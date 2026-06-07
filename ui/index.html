@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Lingua Calc</title>
+    <link rel="stylesheet" href="/styles.css?v=2" />
+  </head>
+  <body>
+    <header class="app-header">
+      <h1>Lingua Calc</h1>
+      <p class="tagline">Chapter stats from .docx (Ancient Greek via Bedrock)</p>
+    </header>
+    <main class="panel">
+      <section class="upload-section" aria-label="Upload">
+        <label class="file-label">
+          <span class="file-label-text">Choose .docx files</span>
+          <input id="file-input" type="file" multiple accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" />
+        </label>
+        <p id="file-name" class="file-name muted">No files selected</p>
+        <button id="process-btn" type="button" disabled>Process files</button>
+        <p id="status" class="status muted" role="status"></p>
+      </section>
+
+      <section id="report-root" class="report-root hidden" aria-label="Report"></section>
+    </main>
+
+    <script type="module" src="/app.js?v=2"></script>
+  </body>
+</html>

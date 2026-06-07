@@ -1,0 +1,29 @@
+[project]
+name = "lingua-calc"
+version = "0.1.0"
+description = "LGPSI-style chapter linguistic stats from .docx via Bedrock"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "fastapi>=0.110",
+  "uvicorn[standard]>=0.27",
+  "python-multipart>=0.0.9",
+  "boto3>=1.34",
+  "python-docx>=1.1",
+  "pydantic>=2.6",
+  "pydantic-settings>=2.2",
+]
+
+[project.optional-dependencies]
+dev = ["httpx>=0.27"]
+
+[project.scripts]
+lingua-calc = "lingua_calc.__main__:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["lingua_calc*"]
