@@ -1,75 +1,99 @@
 from __future__ import annotations
 
-from collections import Counter
+from collections import defaultdict
+from dataclasses import dataclass
 
-from lingua_calc.models import ChapterSummary, ChapterReport, ParsedToken, TokenRow
+from lingua_calc.corpus import CorpusIndex
+from lingua_calc.models import ChapterReport, ChapterSummary, FormStat, TokenRow
 
 
-def build_chapter_report(
-    chapter_id: str,
-    title: str,
-    tokens: list[ParsedToken],
-    chapter_index: int,
-    lemma_first_chapter: dict[str, int],
-    lemma_last_chapter: dict[str, int],
-    parse_first_chapter: dict[tuple[str, str], int],
-    parse_last_chapter: dict[tuple[str, str], int],
-) -> ChapterReport:
-    lemma_counts: Counter[str] = Counter()
-    parse_counts: Counter[tuple[str, str]] = Counter()
-    form_key_counts: Counter[tuple[str, str, str]] = Counter()
-    first_parse_index: dict[tuple[str, str], int] = {}
-    first_form_index: dict[tuple[str, str], int] = {}
-    last_parse_index: dict[tuple[str, str], int] = {}
-    form_tokens: dict[tuple[str, str, str], ParsedToken] = {}
+@dataclass
+class _FormAccum:
+    form: str
+    occ: int
+    first_position: int
 
-    for index, t in enumerate(tokens):
-        lemma_counts[t.lemma] += 1
-        parse_counts[(t.lemma, t.parse)] += 1
-        form_key_counts[(t.lemma, t.parse, t.form)] += 1
-        first_parse_index.setdefault((t.lemma, t.parse), index)
-        first_form_index.setdefault((t.lemma, t.form), index)
-        last_parse_index[(t.lemma, t.parse)] = index
-        form_tokens.setdefault((t.lemma, t.parse, t.form), t)
 
-    seen_groups = sorted(first_parse_index.keys(), key=lambda group: first_parse_index[group])
+def build_chapter_report(chapter_index: int, index: CorpusIndex) -> ChapterReport:
+    """Build one chapter's displayed table from the corpus index.
+
+    Rows are at (lemma, parse) grain in first-appearance order, unchanged from
+    before. What changed: every surface form in a group survives on
+    ``TokenRow.forms`` instead of only the most frequent one, and first/last
+    occurrence is carried as chapter indexes rather than booleans.
+    """
+    facts = index.facts_in(chapter_index)
+
+    # Single pass, bucketing forms by their group. The previous implementation
+    # rescanned every (lemma, parse, form) key once per group, which is
+    # O(groups x forms) — fine per chapter, but the corpus-wide table in issue #5
+    # has both terms sized by total vocabulary.
+    group_first_position: dict[tuple[str, str], int] = {}
+    group_type: dict[tuple[str, str], str] = {}
+    group_forms: dict[tuple[str, str], dict[str, _FormAccum]] = defaultdict(dict)
+
+    for fact in facts:
+        key = fact.parse_key
+        group_first_position.setdefault(key, fact.position)
+        group_type.setdefault(key, fact.type)
+        forms = group_forms[key]
+        accum = forms.get(fact.form)
+        if accum is None:
+            forms[fact.form] = _FormAccum(form=fact.form, occ=1, first_position=fact.position)
+        else:
+            accum.occ += 1
+
     rows: list[TokenRow] = []
+    for key in sorted(group_first_position, key=group_first_position.__getitem__):
+        lemma, parse = key
+        # Most frequent form wins; earliest appearance breaks ties. This picks
+        # the row's representative `form` only — nothing is discarded.
+        ranked = sorted(group_forms[key].values(), key=lambda a: (-a.occ, a.first_position))
+        representative = ranked[0]
 
-    for lemma, parse in seen_groups:
-        candidates = [((l, p, f), cnt) for (l, p, f), cnt in form_key_counts.items() if l == lemma and p == parse]
-        if not candidates:
-            continue
-        candidates.sort(
-            key=lambda x: (
-                -x[1],
-                first_form_index.get((lemma, x[0][2]), 0),
-            )
-        )
-        (_, _, best_form), _ = candidates[0]
-        source = form_tokens.get((lemma, parse, best_form))
+        lemma_track = index.lemma(lemma)
+        parse_track = index.parse(lemma, parse)
+        form_track = index.form(lemma, representative.form)
 
         rows.append(
             TokenRow(
-                type=source.type if source else "",
+                type=group_type[key],
                 lemma=lemma,
-                form=best_form,
+                form=representative.form,
                 parse=parse,
-                lemma_occ=lemma_counts[lemma],
-                parse_occ=parse_counts.get((lemma, parse), 0),
-                first_occ_lemma=lemma_first_chapter.get(lemma) == chapter_index,
-                first_occ_parse=parse_first_chapter.get((lemma, parse)) == chapter_index,
-                last_occ_lemma=lemma_last_chapter.get(lemma) == chapter_index,
-                last_occ_parse=parse_last_chapter.get((lemma, parse)) == chapter_index,
+                chapter_index=chapter_index,
+                lemma_occ=lemma_track.count_in(chapter_index),
+                parse_occ=parse_track.count_in(chapter_index),
+                form_occ=representative.occ,
+                forms=[
+                    FormStat(form=a.form, occ=a.occ, first_position=a.first_position) for a in ranked
+                ],
+                lemma_first_chapter=_chapter_or(lemma_track.first_chapter, chapter_index),
+                lemma_last_chapter=_chapter_or(lemma_track.last_chapter, chapter_index),
+                parse_first_chapter=_chapter_or(parse_track.first_chapter, chapter_index),
+                parse_last_chapter=_chapter_or(parse_track.last_chapter, chapter_index),
+                form_first_chapter=_chapter_or(form_track.first_chapter, chapter_index),
+                form_last_chapter=_chapter_or(form_track.last_chapter, chapter_index),
             )
         )
 
-    unique_lemmas = len({t.lemma for t in tokens})
-    unique_forms = len({(t.lemma, t.form) for t in tokens})
-
+    ref = index.chapter_ref(chapter_index)
+    stats = index.chapter_stats(chapter_index)
     summary = ChapterSummary(
-        id=chapter_id,
-        title=title,
-        unique_lemmas=unique_lemmas,
-        unique_forms=unique_forms,
+        id=ref.id if ref else f"ch-{chapter_index + 1}",
+        title=ref.title if ref else "",
+        chapter_index=chapter_index,
+        unique_lemmas=stats.unique_lemmas,
+        unique_forms=stats.unique_forms,
+        token_count=stats.token_count,
     )
     return ChapterReport(summary=summary, rows=rows)
+
+
+def _chapter_or(value: int | None, fallback: int) -> int:
+    """Coerce an optional chapter index.
+
+    Keys are drawn from the chapter's own facts, so the track always has at
+    least this chapter and ``value`` is never ``None`` in practice.
+    """
+    return fallback if value is None else value

@@ -40,6 +40,11 @@ class Settings(BaseSettings):
         description="Max concurrent Bedrock calls (per chapter fan-out and per chunk fan-out).",
     )
     debug_tracebacks: bool = Field(default=False, validation_alias="LINGUA_DEBUG_TRACEBACKS")
+    # Where the token-fact store lives. Persisting each run lets reporting be
+    # re-derived without paying for another Bedrock pass, and lets two model runs
+    # over the same text be compared. Set LINGUA_PERSIST_RUNS=false to disable.
+    db_path: str = Field(default="data/lingua_calc.sqlite3", validation_alias="LINGUA_DB_PATH")
+    persist_runs: bool = Field(default=True, validation_alias="LINGUA_PERSIST_RUNS")
     bedrock_timeout_seconds: int = Field(
         default=1200,
         validation_alias="BEDROCK_TIMEOUT_SECONDS",
