@@ -50,6 +50,16 @@ All set via `.env`. The credential values above are required; everything below h
 | `LINGUA_MAX_WORKERS` | Concurrent Bedrock calls per fan-out level (default `8`) |
 | `LINGUA_MAX_CHUNK_CHARS` | Max chars per chunk sent to the model (default `1200`) |
 | `LINGUA_DEBUG_TRACEBACKS` | `true` to include Python tracebacks in API error JSON (default off) |
+| `LINGUA_DB_PATH` | Where run history is stored (default `data/lingua_calc.sqlite3`) |
+| `LINGUA_PERSIST_RUNS` | `false` to disable saving run history |
+| `LINGUA_HOST` / `LINGUA_PORT` | Where the local UI binds (default `127.0.0.1:8765`) |
+| `LINGUA_OPEN_BROWSER` | `false` to skip opening a browser on launch |
+
+The `LINGUA_` prefix is required on every app setting. Names like `DB_PATH`,
+`PORT` and `MAX_WORKERS` are deliberately *not* read — other tools set those, and
+an inherited value silently repointing the database or the Bedrock concurrency
+would look like a normal run. Only the AWS and Bedrock variables above use their
+standard unprefixed names, so an existing boto3 setup keeps working.
 
 ## Chapters
 

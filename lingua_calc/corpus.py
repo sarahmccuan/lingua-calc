@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import Iterable, Iterator
 
 from lingua_calc.models import TokenFact
+from lingua_calc.morphology import FEATURE_DIMENSIONS, MorphStatus, is_verb_form
 
 
 class Track:
@@ -134,6 +135,66 @@ class ChapterStats:
     _forms: set[tuple[str, str]] = field(default_factory=set, repr=False)
 
 
+@dataclass(frozen=True)
+class MorphCoverage:
+    """Audit of how much morphology was actually decoded.
+
+    Exists so grammar counts can be reported with their own error bars. Without
+    it, a label the normalizer failed to read is indistinguishable from a form
+    the text genuinely does not contain — which is exactly the trap that made
+    counting off raw parse strings unsafe.
+    """
+
+    total: int
+    ok: int
+    partial: int
+    descriptive: int
+    not_applicable: int
+    unparsed: int
+
+    verb_forms: int
+    """Tokens where voice is expected, by label or by part of speech.
+
+    Not the same as tokens typed "verb": the type is free text the provider
+    chooses, and a token typed "participle" or mistyped outright still carries a
+    verbal label. Counting only literal "verb" types here while the numerator
+    was drawn from the label made the two figures incomparable.
+    """
+
+    verbs_missing_voice: int
+    """Subset of ``verb_forms`` whose label never stated a voice."""
+
+    @property
+    def morphological(self) -> int:
+        """Tokens that claimed to carry morphology, i.e. everything but "-"."""
+        return self.total - self.not_applicable
+
+    @property
+    def understood(self) -> int:
+        """Fully decoded, counting purely lexical labels as understood."""
+        return self.ok + self.descriptive
+
+    @property
+    def needs_attention(self) -> int:
+        """Labels the normalizer could not fully read."""
+        return self.partial + self.unparsed
+
+    @property
+    def understood_share(self) -> float:
+        """Fraction of morphology-bearing tokens fully decoded, 1.0 if none."""
+        return 1.0 if self.morphological == 0 else self.understood / self.morphological
+
+    @property
+    def voice_gap_share(self) -> float:
+        """Fraction of verb forms that never stated voice, 0.0 if there are none.
+
+        Non-zero means voice counts understate — the model omitted the feature
+        rather than the text lacking it. Both sides come from ``is_verb_form``,
+        so this is always in [0.0, 1.0].
+        """
+        return 0.0 if self.verb_forms == 0 else self.verbs_missing_voice / self.verb_forms
+
+
 class CorpusIndex:
     """Queryable index over every token in a run.
 
@@ -159,6 +220,21 @@ class CorpusIndex:
         self._form_parses: dict[tuple[str, str, str], Track] = defaultdict(Track)
         self._types: dict[str, Track] = defaultdict(Track)
 
+        # Morphological features, keyed (dimension, value). Two indexes because
+        # syncretism has two correct readings: `_features` holds the value
+        # exactly as decoded ("acc|nom"), `_features_incl` additionally files an
+        # ambiguous token under each alternative so a plain accusative count
+        # does not silently drop syncretic forms.
+        self._features: dict[tuple[str, str], Track] = defaultdict(Track)
+        self._features_incl: dict[tuple[str, str], Track] = defaultdict(Track)
+        self._morph_status: dict[str, Track] = defaultdict(Track)
+        self._descriptors: dict[str, Track] = defaultdict(Track)
+        # Numerator and denominator of the voice-gap figure, filled from the one
+        # predicate so the gap set is a subset of the population by construction.
+        self._verb_forms = Track()
+        self._voice_gaps = Track()
+        self._deponents = Track()
+
         by_chapter: dict[int, list[TokenFact]] = defaultdict(list)
         refs: dict[int, ChapterRef] = {}
         stats: dict[int, ChapterStats] = defaultdict(ChapterStats)
@@ -181,6 +257,21 @@ class CorpusIndex:
             self._forms[fact.form_key].add(ci)
             self._form_parses[fact.form_parse_key].add(ci)
             self._types[fact.type].add(ci)
+
+            morph = fact.morph
+            for dimension, value in morph.features().items():
+                self._features[(dimension, value)].add(ci)
+                for alternative in value.split("|"):
+                    self._features_incl[(dimension, alternative)].add(ci)
+            self._morph_status[morph.status.value].add(ci)
+            for descriptor in morph.descriptors:
+                self._descriptors[descriptor].add(ci)
+            if is_verb_form(morph, fact.type):
+                self._verb_forms.add(ci)
+                if morph.voice is None:
+                    self._voice_gaps.add(ci)
+            if morph.is_deponent:
+                self._deponents.add(ci)
 
             st = stats[ci]
             st.token_count += 1
@@ -229,6 +320,98 @@ class CorpusIndex:
 
     def token_type(self, type_: str) -> Track:
         return self._types.get(type_, _EMPTY_TRACK)
+
+    # -- morphological features ------------------------------------------
+    #
+    # The dimension for issue #7: "21 present tenses, 0 future tenses" is
+    # `feature_any("tense", "pres").count_in(ch)`. Counting these off the raw
+    # `parse` string does not work — see morphology.py.
+
+    def feature_any(self, dimension: str, value: str) -> Track:
+        """Tokens carrying ``value`` in ``dimension``, counting ambiguous forms.
+
+        The right default for grammar counts: a token parsed ``nom./acc.``
+        counts toward both nominatives and accusatives, because excluding
+        syncretic forms would undercount both.
+        """
+        return self._features_incl.get((dimension, value), _EMPTY_TRACK)
+
+    def feature(self, dimension: str, value: str) -> Track:
+        """Tokens whose decoded value is exactly ``value``.
+
+        Ambiguity is a distinct value here, so ``feature("case", "acc")``
+        excludes ``"acc|nom"``. Use when the distinction itself matters.
+        """
+        return self._features.get((dimension, value), _EMPTY_TRACK)
+
+    def iter_feature_values(self, dimension: str) -> Iterator[tuple[str, Track]]:
+        """Every value seen in ``dimension``, sorted, ambiguity included.
+
+        A grammar profile is this plus ``count_in``; note that a value never
+        seen in the corpus is absent rather than zero, so callers reporting
+        "0 futures" must supply the expected vocabulary themselves.
+
+        These counts overlap and do not sum to a total. A token parsed
+        ``nom./acc.`` is yielded under both ``"nom"`` and ``"acc"`` — correct for
+        reading a row on its own, wrong for adding up, where it would push a case
+        profile past the chapter's token count. The compound value ``"acc|nom"``
+        is not yielded here at all; reach for ``feature()`` when the profile has
+        to partition rather than overlap.
+        """
+        keys = sorted(value for dim, value in self._features_incl if dim == dimension)
+        for value in keys:
+            yield value, self._features_incl[(dimension, value)]
+
+    def iter_feature_dimensions(self) -> Iterator[str]:
+        return iter(FEATURE_DIMENSIONS)
+
+    def deponents(self) -> Track:
+        """Tokens labelled deponent — middle in form, active in meaning.
+
+        These are inside ``feature_any("voice", "mid")`` too, because that is what
+        their morphology is. This track answers the separate lexical question, so
+        a middle-voice count and a deponent count never have to be read off each
+        other.
+        """
+        return self._deponents
+
+    def descriptor(self, descriptor: str) -> Track:
+        """Lexical labels that carry no morphology ("interrogative", "def. art.")."""
+        return self._descriptors.get(descriptor, _EMPTY_TRACK)
+
+    def iter_descriptors(self) -> Iterator[tuple[str, Track]]:
+        for key in sorted(self._descriptors):
+            yield key, self._descriptors[key]
+
+    def morph_status(self, status: MorphStatus | str) -> Track:
+        key = status.value if isinstance(status, MorphStatus) else status
+        return self._morph_status.get(key, _EMPTY_TRACK)
+
+    def coverage(self, chapter_index: int | None = None) -> MorphCoverage:
+        """How much of the corpus the normalizer actually understood.
+
+        Grammar counts are only as trustworthy as this. Report it alongside
+        them rather than letting unparsed labels read as absence.
+        """
+
+        def count(track: Track) -> int:
+            return track.total if chapter_index is None else track.count_in(chapter_index)
+
+        total = (
+            self.total_tokens
+            if chapter_index is None
+            else self.chapter_stats(chapter_index).token_count
+        )
+        return MorphCoverage(
+            total=total,
+            ok=count(self.morph_status(MorphStatus.OK)),
+            partial=count(self.morph_status(MorphStatus.PARTIAL)),
+            descriptive=count(self.morph_status(MorphStatus.DESCRIPTIVE)),
+            not_applicable=count(self.morph_status(MorphStatus.NOT_APPLICABLE)),
+            unparsed=count(self.morph_status(MorphStatus.UNPARSED)),
+            verb_forms=count(self._verb_forms),
+            verbs_missing_voice=count(self._voice_gaps),
+        )
 
     # -- iteration ------------------------------------------------------
     #

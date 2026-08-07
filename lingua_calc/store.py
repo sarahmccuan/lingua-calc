@@ -28,7 +28,7 @@ from lingua_calc.models import TokenFact
 
 logger = logging.getLogger(__name__)
 
-_SCHEMA = """
+_TABLES = """
 CREATE TABLE IF NOT EXISTS runs (
     id            TEXT PRIMARY KEY,
     created_at    TEXT NOT NULL,
@@ -50,15 +50,33 @@ CREATE TABLE IF NOT EXISTS token_facts (
     lemma         TEXT NOT NULL,
     form          TEXT NOT NULL,
     parse         TEXT NOT NULL,
+    feat_tense    TEXT,
+    feat_voice    TEXT,
+    feat_mood     TEXT,
+    feat_case     TEXT,
+    feat_number   TEXT,
+    feat_gender   TEXT,
+    feat_person   TEXT,
+    feat_degree   TEXT,
+    feat_status   TEXT,
+    feat_deponent INTEGER,
     PRIMARY KEY (run_id, chapter_index, position)
 ) WITHOUT ROWID;
+"""
 
+# Applied after _migrate, because an index cannot reference a feature column
+# that a pre-morphology database has not been given yet.
+_INDEXES = """
 CREATE INDEX IF NOT EXISTS ix_facts_lemma   ON token_facts (run_id, lemma);
 CREATE INDEX IF NOT EXISTS ix_facts_parse   ON token_facts (run_id, lemma, parse);
 CREATE INDEX IF NOT EXISTS ix_facts_form    ON token_facts (run_id, lemma, form);
 CREATE INDEX IF NOT EXISTS ix_facts_chapter ON token_facts (run_id, chapter_index);
+CREATE INDEX IF NOT EXISTS ix_facts_tense   ON token_facts (run_id, feat_tense);
+CREATE INDEX IF NOT EXISTS ix_facts_case    ON token_facts (run_id, feat_case);
 """
 
+# Columns that define a fact. Reads use only these — morphology is re-derived on
+# load, so a normalizer improvement applies to already-stored runs.
 _FACT_COLUMNS = (
     "filename",
     "chapter_index",
@@ -70,6 +88,45 @@ _FACT_COLUMNS = (
     "form",
     "parse",
 )
+
+# Denormalized copy of the decoded features. Written for ad-hoc SQL ("select
+# feat_tense, count(*) ... group by 1"); never read back into a TokenFact, so it
+# cannot become the source of a stale value. `reindex_run` refreshes it after
+# morphology.py changes.
+_FEATURE_COLUMNS = (
+    "feat_tense",
+    "feat_voice",
+    "feat_mood",
+    "feat_case",
+    "feat_number",
+    "feat_gender",
+    "feat_person",
+    "feat_degree",
+    "feat_status",
+    "feat_deponent",
+)
+
+# Everything here is TEXT except where noted, so `_migrate` can add a column to
+# an older database with the same type the schema declares.
+_FEATURE_COLUMN_TYPES: dict[str, str] = {"feat_deponent": "INTEGER"}
+
+
+def _feature_values(fact: TokenFact) -> tuple:
+    morph = fact.morph
+    return (
+        morph.tense,
+        morph.voice,
+        morph.mood,
+        morph.case,
+        morph.number,
+        morph.gender,
+        morph.person,
+        morph.degree,
+        morph.status.value,
+        # 0/1 rather than a bool, so "... WHERE feat_deponent = 1" reads the way
+        # an ad-hoc SQL query would expect.
+        int(morph.is_deponent),
+    )
 
 
 @dataclass(frozen=True)
@@ -94,7 +151,9 @@ class TokenStore:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
-            conn.executescript(_SCHEMA)
+            conn.executescript(_TABLES)
+            _migrate(conn)
+            conn.executescript(_INDEXES)
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -138,12 +197,34 @@ class TokenStore:
                     note,
                 ),
             )
+            columns = _FACT_COLUMNS + _FEATURE_COLUMNS
             conn.executemany(
-                f"INSERT INTO token_facts (run_id, {', '.join(_FACT_COLUMNS)})"
-                f" VALUES (?, {', '.join('?' * len(_FACT_COLUMNS))})",
-                [(run_id, *(getattr(f, c) for c in _FACT_COLUMNS)) for f in facts],
+                f"INSERT INTO token_facts (run_id, {', '.join(columns)})"
+                f" VALUES (?, {', '.join('?' * len(columns))})",
+                [
+                    (run_id, *(getattr(f, c) for c in _FACT_COLUMNS), *_feature_values(f))
+                    for f in facts
+                ],
             )
         return run_id
+
+    def reindex_run(self, run_id: str) -> int:
+        """Recompute the denormalized feature columns from stored labels.
+
+        Run after ``morphology.py`` learns a new abbreviation, so ad-hoc SQL
+        against an old run sees the same features the index does. Returns the
+        number of rows refreshed.
+        """
+        facts = self.load_facts(run_id)
+        if not facts:
+            return 0
+        with self._connect() as conn:
+            conn.executemany(
+                f"UPDATE token_facts SET {', '.join(f'{c} = ?' for c in _FEATURE_COLUMNS)}"
+                " WHERE run_id = ? AND chapter_index = ? AND position = ?",
+                [(*_feature_values(f), run_id, f.chapter_index, f.position) for f in facts],
+            )
+        return len(facts)
 
     def delete_run(self, run_id: str) -> None:
         with self._connect() as conn:
@@ -181,6 +262,19 @@ class TokenStore:
     def load_index(self, run_id: str) -> CorpusIndex:
         """Rebuild a queryable index from a stored run — no provider call."""
         return CorpusIndex(self.load_facts(run_id))
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add feature columns to a database created before morphology existed.
+
+    ``CREATE TABLE IF NOT EXISTS`` silently leaves an older table alone, so a
+    store written by the previous version would otherwise fail every insert.
+    """
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(token_facts)")}
+    for column in _FEATURE_COLUMNS:
+        if column not in existing:
+            column_type = _FEATURE_COLUMN_TYPES.get(column, "TEXT")
+            conn.execute(f"ALTER TABLE token_facts ADD COLUMN {column} {column_type}")
 
 
 def _run_info(row: sqlite3.Row) -> RunInfo:
