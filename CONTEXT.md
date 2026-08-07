@@ -42,6 +42,32 @@ Two consequences worth knowing:
 
 **Deliberately not pandas.** At learner-text scale (order 100k tokens) `Counter`/`dict` is milliseconds; a dataframe dependency would add real weight to the packaged build and buy nothing. What was wrong was the shape, not the arithmetic.
 
+## Grammar / morphology (issue #7)
+
+`parse` is a compact human label, and the model does not write it consistently. Across 31,902 logged tokens the same fact appeared under four spellings (`pres. act. ind. 3sg` / `pres. ind. 3sg` / `pres. ind. 3sg.` / `pres. act. ind. 3sg.`), gender alternated `fem.`/`f.`, articles alternated `def. art.`/`definite article`, and **28% of verb tokens omitted voice entirely**. Counting grammar by matching that string undercounts silently, and "0 futures" becomes indistinguishable from "futures spelled differently".
+
+So `morphology.py` decodes each label into typed features — tense, voice, mood, case, number, gender, person, degree — and `CorpusIndex` indexes them as a real dimension:
+
+```python
+index.feature_any("tense", "aor").count_in(chapter)      # aorists in a chapter
+index.feature_any("tense", "aor").cumulative_through(ch) # …running total
+index.iter_feature_values("mood")                        # the grammar profile
+```
+
+Three rules the layer is built on:
+
+- **`None` means the label did not say — never "not applicable".** A verb with `voice=None` is a data gap, not an active verb, and defaulting it would fabricate data.
+- **Ambiguity is preserved, not resolved.** Greek syncretism (`nom./acc.`) becomes the canonical value `"acc|nom"`. `feature_any` counts it toward *both* nominative and accusative (right for "how many accusatives"); `feature` matches the exact value (use when the distinction matters).
+- **Coverage is reportable.** `MorphStatus` tags every token `ok` / `partial` / `descriptive` / `not_applicable` / `unparsed`, and `index.coverage()` summarises it. Grammar counts should be shown with this next to them, so an unreadable label never reads as absence of that grammar.
+
+**The prompt was tightened too** (`nlp/bedrock.py`): fixed field order, mandatory voice on every verb form, explicit gender abbreviations (previously the prompt never specified them at all, which is exactly why `fem.`/`f.` drifted), no trailing period, slash for genuine ambiguity. The normalizer stays deliberately tolerant regardless — it is the safety net for drift and for runs already in the store.
+
+**Not structured JSON fields.** Emitting `{"tense": "pres", "voice": "act", …}` per token would roughly double output tokens, and output generation is the documented bottleneck (see below) — directly against issue #1. A strict canonical label plus a tolerant decoder gets the same data at the current token cost.
+
+Measured on the stored `Basil To the Rich` run (4,213 tokens): 100% of morphology-bearing tokens decoded, 0 partial, 0 unparsed, 0.2% voice gap. Re-validating is `store.load_index(run_id).coverage()`.
+
+**Improving the normalizer re-counts old runs for free.** `TokenFact.morph` is always derived from `parse` on construction, so reloading a stored run picks up new abbreviations automatically. The `feat_*` columns in SQLite are a denormalized convenience for ad-hoc SQL (`select feat_tense, count(*) … group by 1`), never read back into a fact; `store.reindex_run(run_id)` refreshes them.
+
 **Tests:** `pip install -e ".[dev]"` then `pytest`. `tests/conftest.py` has a `WordProvider` stand-in and an in-memory `.docx` builder, so the pipeline is testable without touching Bedrock.
 
 ## Performance & throughput

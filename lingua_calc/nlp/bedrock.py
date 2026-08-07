@@ -27,19 +27,40 @@ _SYSTEM_PROMPT = textwrap.dedent(
         - "form": the surface form as it appears in the text (Greek script).
         - "parse": brief morphological label in a normalized abbreviated format.
 
-        Use only these parse abbreviations and order:
-        - cases: nom., gen., dat., acc., voc.
-        - numbers: sg., pl.
-        - voices: act., mid., pass.
-        - moods: ind., subj., opt., imp., inf., part.
-        - tenses: pres., impf., fut., aor., perf., plup.
-        - persons: 1, 2, 3 followed by sg. or pl. when applicable.
+        The "parse" field is parsed by a program, so it must follow this grammar exactly.
 
-        Examples:
-        - noun phrase: "nom. sg.", "gen. pl.", "acc. sg. fem."
-        - verb: "pres. act. ind. 3sg", "aor. pass. ind. 1pl", "impf. mid. subj. 3pl"
-        - article: "def. art. nom. sg.", "indef. art. acc. pl."
-        - if no morphological parse applies: "-"
+        Use ONLY these abbreviations, lowercase, separated by single spaces:
+        - cases:   nom. gen. dat. acc. voc.
+        - numbers: sg. pl.
+        - genders: masc. fem. neut.      (always these three spellings — never m., f., n.)
+        - tenses:  pres. impf. fut. aor. perf. plup.
+        - voices:  act. mid. pass.
+        - moods:   ind. subj. opt. imp. inf. part.
+        - persons: 1 2 3, fused to the number as 1sg 2sg 3sg 1pl 2pl 3pl
+
+        Field order is fixed:
+        - nominals (noun, adjective, article, pronoun, numeral): case, number, gender
+          e.g. "nom. sg. fem.", "gen. pl. masc.", "acc. sg. neut."
+        - finite verbs: tense, voice, mood, person+number
+          e.g. "pres. act. ind. 3sg", "aor. pass. ind. 1pl", "impf. mid. subj. 3pl"
+        - infinitives:  tense, voice, "inf."            e.g. "aor. act. inf."
+        - participles:  tense, voice, "part.", case, number, gender
+          e.g. "pres. act. part. nom. sg. masc."
+
+        Rules that matter most:
+        - ALWAYS state voice on every verb form, including participles and infinitives.
+          Write "pres. act. ind. 3sg", never "pres. ind. 3sg". If the voice is
+          genuinely ambiguous between middle and passive, write "mid./pass.".
+        - Do NOT end the parse with a period after a person+number token: write
+          "pres. act. ind. 3sg", not "pres. act. ind. 3sg.".
+        - Prefix articles with "def. art." or "indef. art." and then the nominal
+          fields, e.g. "def. art. nom. sg. fem.". Spell it "def. art.", never
+          "definite article".
+        - When a form is genuinely ambiguous between two values of the SAME field,
+          join them with a slash: "nom./acc. sg. neut.", "gen. sg. masc./neut.".
+        - Use "-" only when no morphological parse applies at all (e.g. most
+          particles, conjunctions, prepositions, adverbs). Do not invent a label
+          and do not write prose such as "abbreviation for X" or "(incomplete)".
 
         IMPORTANT: Only output one token object per lexical item. Do not output tokens for punctuation or whitespace. Omit any token whose type would be "punctuation" or that represents only spacing.
 

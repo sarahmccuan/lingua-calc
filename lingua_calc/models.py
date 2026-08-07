@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field, computed_field
+from pydantic import BaseModel, Field, computed_field, model_validator
+
+from lingua_calc.morphology import Morphology, parse_morphology
 
 
 class ParsedToken(BaseModel):
@@ -24,6 +26,23 @@ class TokenFact(ParsedToken):
     chapter_id: str
     chapter_title: str
     position: int = Field(description="Token position within its chapter, 0-based, reading order")
+
+    morph: Morphology = Field(
+        default_factory=Morphology,
+        description="Typed features decoded from `parse`. Always derived, never supplied.",
+    )
+
+    @model_validator(mode="after")
+    def _derive_morphology(self) -> "TokenFact":
+        """Recompute ``morph`` from ``parse`` on every construction.
+
+        Deliberately ignores any supplied value, so morphology is a pure
+        function of the label and can never go stale. This is what lets an
+        improvement to ``morphology.py`` re-count an already-stored run: reload
+        the facts and the features are current.
+        """
+        self.morph = parse_morphology(self.parse, self.type)
+        return self
 
     @property
     def lemma_key(self) -> str:

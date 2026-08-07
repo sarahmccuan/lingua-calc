@@ -102,11 +102,15 @@ def make_docx(sections: list[tuple[str | None, str]]) -> bytes:
 
 @pytest.fixture
 def settings(tmp_path):
-    """Settings pointed at a throwaway database, with credentials stubbed out."""
+    """Settings pointed at a throwaway database."""
     from lingua_calc.config import Settings
 
-    return Settings(
-        db_path=str(tmp_path / "test.sqlite3"),
-        persist_runs=True,
-        max_workers=2,
-    )
+    db_path = tmp_path / "test.sqlite3"
+    settings = Settings(db_path=str(db_path), persist_runs=True, max_workers=2)
+
+    # These fields are prefix-derived rather than alias-carrying, so a keyword
+    # by field name binds. Give one a validation_alias and it silently stops
+    # binding — which is how this fixture once handed back the default path and
+    # the suite wrote to the real database. Assert rather than trust it.
+    assert settings.db_path == str(db_path), "settings override was ignored"
+    return settings

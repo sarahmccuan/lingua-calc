@@ -3,7 +3,33 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    """Runtime configuration, read from ``.env`` or the environment.
+
+    Two rules govern where a value comes from:
+
+    - **App-specific settings are namespaced by ``env_prefix``.** ``db_path``
+      reads ``LINGUA_DB_PATH`` and nothing else. The prefix is not decoration:
+      ``DB_PATH``, ``PORT``, ``HOST`` and ``MAX_WORKERS`` are names other tools
+      set routinely, and an inherited one silently repointing the database or the
+      Bedrock concurrency is a failure that looks like a successful run.
+    - **Settings owned by someone else keep their standard names.** An explicit
+      ``validation_alias`` opts a field out of the prefix, which is how the AWS
+      and Bedrock fields below read the variables boto3 users already have set.
+
+    ``populate_by_name`` is deliberately absent. It was here so ``Settings(
+    db_path=...)`` worked as a keyword argument — real, and ``tests/conftest.py``
+    depends on it — but in ``BaseSettings`` it *also* makes every field name a
+    second env var, which is exactly what re-exposed the unprefixed names the
+    aliases existed to avoid. Fields without a ``validation_alias`` accept a
+    keyword argument by name anyway, so nothing was lost by dropping it.
+    """
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        env_prefix="LINGUA_",
+    )
 
     aws_region: str = Field(
         default="us-east-1",
@@ -33,18 +59,17 @@ class Settings(BaseSettings):
     # triggers the (sequential) recursive re-split in BedrockClaudeProvider.
     # 1200 chars (~11k output tokens) leaves comfortable margin under the cap and
     # yields more, smaller chunks that run in parallel.
-    max_chunk_chars: int = Field(default=1200, validation_alias="LINGUA_MAX_CHUNK_CHARS")
+    max_chunk_chars: int = 1200
     max_workers: int = Field(
         default=8,
-        validation_alias="LINGUA_MAX_WORKERS",
         description="Max concurrent Bedrock calls (per chapter fan-out and per chunk fan-out).",
     )
-    debug_tracebacks: bool = Field(default=False, validation_alias="LINGUA_DEBUG_TRACEBACKS")
+    debug_tracebacks: bool = False
     # Where the token-fact store lives. Persisting each run lets reporting be
     # re-derived without paying for another Bedrock pass, and lets two model runs
     # over the same text be compared. Set LINGUA_PERSIST_RUNS=false to disable.
-    db_path: str = Field(default="data/lingua_calc.sqlite3", validation_alias="LINGUA_DB_PATH")
-    persist_runs: bool = Field(default=True, validation_alias="LINGUA_PERSIST_RUNS")
+    db_path: str = "data/lingua_calc.sqlite3"
+    persist_runs: bool = True
     bedrock_timeout_seconds: int = Field(
         default=1200,
         validation_alias="BEDROCK_TIMEOUT_SECONDS",
