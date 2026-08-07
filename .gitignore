@@ -10,4 +10,5 @@ build/
 .env
 .DS_Store
 logs/
+data/
 .claude/settings.local.json
