@@ -5,6 +5,16 @@ function setStatus(el, text, isError = false) {
   el.classList.toggle("error", isError);
 }
 
+const ORDINAL_COL = 0;
+
+// The "#" column is a running count of what is on screen, not a property of the
+// row: it always reads 1..N top to bottom, so it is rewritten after every sort.
+function renumber(tbody) {
+  Array.from(tbody.rows).forEach((tr, i) => {
+    tr.cells[ORDINAL_COL].textContent = String(i + 1);
+  });
+}
+
 function renderChapter(ch, root) {
   const { summary, rows } = ch;
   const details = document.createElement("details");
@@ -25,6 +35,7 @@ function renderChapter(ch, root) {
   const thead = document.createElement("thead");
   thead.innerHTML = `
     <tr>
+      <th class="row-num">#</th>
       <th>type</th>
       <th>lemma</th>
       <th>form</th>
@@ -43,6 +54,9 @@ function renderChapter(ch, root) {
   sortIndicator.className = "sort-indicator muted";
   sortIndicator.textContent = "";
   ths.forEach((th, idx) => {
+    // The ordinal column always counts 1..N down the visible rows, so there is
+    // nothing in it to sort by — leave it out of the header wiring.
+    if (idx === ORDINAL_COL) return;
     th.classList.add("sortable");
     th.dataset.colIndex = String(idx);
     th.addEventListener("click", () => {
@@ -60,6 +74,7 @@ function renderChapter(ch, root) {
   for (const r of rows) {
     const tr = document.createElement("tr");
     tr.innerHTML = `
+      <td class="row-num"></td>
       <td>${escapeHtml(r.type)}</td>
       <td class="greek">${escapeHtml(r.lemma)}</td>
       <td class="greek">${escapeHtml(r.form)}</td>
@@ -74,6 +89,7 @@ function renderChapter(ch, root) {
     tbody.appendChild(tr);
   }
   table.append(thead, tbody);
+  renumber(tbody);
   
   function getCellValue(row, i) {
     const cell = row.children[i];
@@ -81,8 +97,8 @@ function renderChapter(ch, root) {
     return cell.textContent.trim();
   }
 
-  const numericCols = new Set([4, 5]);
-  const booleanCols = new Set([6, 7, 8, 9]);
+  const numericCols = new Set([5, 6]);
+  const booleanCols = new Set([7, 8, 9, 10]);
 
   function sortTable(tbl, colIndex, asc = true) {
     const tbody = tbl.tBodies[0];
@@ -103,6 +119,7 @@ function renderChapter(ch, root) {
       return asc ? va.localeCompare(vb, undefined, {sensitivity: "base"}) : vb.localeCompare(va, undefined, {sensitivity: "base"});
     });
     rows.forEach((r) => tbody.appendChild(r));
+    renumber(tbody);
   }
   wrap.append(sortIndicator, table);
   details.append(sum, wrap);
