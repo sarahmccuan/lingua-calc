@@ -7,6 +7,9 @@
   --header-bg: #e4e4e7;
   --accent: #2563eb;
   --error: #b91c1c;
+  /* Translucent so row shading composites over whatever is behind the table. */
+  --row-alt: rgba(0, 0, 0, 0.035);
+  --row-hover: rgba(37, 99, 235, 0.09);
   font-family: system-ui, "Segoe UI", Roboto, sans-serif;
 }
 
@@ -19,6 +22,8 @@
     --header-bg: #27272a;
     --accent: #60a5fa;
     --error: #f87171;
+    --row-alt: rgba(255, 255, 255, 0.045);
+    --row-hover: rgba(96, 165, 250, 0.14);
   }
 }
 
@@ -174,7 +179,6 @@ th,
 td {
   white-space: nowrap;
   padding: 0.35rem 0.5rem;
-  border-bottom: 1px solid var(--border);
   text-align: left;
   vertical-align: top;
 }
@@ -182,6 +186,27 @@ td {
 th {
   background: var(--header-bg);
   font-weight: 600;
+  border-bottom: 1px solid var(--border);
+}
+
+/* Row separation is carried by the shading alone — per-row rules on top of it
+   only add noise at this column count. */
+tbody tr:nth-child(even) {
+  background: var(--row-alt);
+}
+
+tbody tr:hover {
+  background: var(--row-hover);
+}
+
+/* Ordinal column: present but quiet, and narrow enough not to cost real width.
+   Right-aligned with tabular figures so the digits stay in a clean column and
+   line up under the "#" as the count reaches three or four places. */
+.row-num {
+  width: 1%;
+  text-align: right;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
 }
 
 th.sortable {
