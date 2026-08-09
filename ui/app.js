@@ -126,10 +126,20 @@ function renderChapter(ch, root) {
   root.appendChild(details);
 }
 
-function renderReport(data) {
+function renderReport(data, notice = null) {
   const root = $("report-root");
   root.classList.remove("hidden");
   root.replaceChildren();
+
+  // A report re-derived from the store is indistinguishable from a fresh run
+  // once rendered, so say which one is on screen. Without this, loading an old
+  // run silently replaces the report you just paid Bedrock for.
+  if (notice) {
+    const banner = document.createElement("p");
+    banner.className = "report-notice muted";
+    banner.textContent = notice;
+    root.appendChild(banner);
+  }
 
   // The backend always returns a MultiFileReport: one section per file.
   for (const fileRep of data.file_reports) {
@@ -153,6 +163,145 @@ function renderReport(data) {
   }
 }
 
+// -- run history ------------------------------------------------------------
+//
+// Runs are identified by their timestamp — a wall-clock time is far more
+// recognisable to the author than a uuid — so it is the first column and the
+// label in every confirm. This is a display choice only: `store.list_runs`
+// still breaks ties on id, because the clock is coarse enough that two runs
+// can share a timestamp even if hand-driven authoring never produces them.
+//
+// It is also the weak point of the panel. Re-running the same file is the
+// normal authoring loop, and nothing else distinguishes those rows; see the
+// run-history section of CONTEXT.md.
+
+function runLabel(run) {
+  // Stored as UTC ISO; shown in local time, which is the identifier the author
+  // will actually recognise.
+  const d = new Date(run.created_at);
+  return isNaN(d) ? run.created_at : d.toLocaleString();
+}
+
+const PAGE_SIZE = 10;
+
+// Deleting is a selection-then-act flow only: tick the rows, confirm the list.
+// There is no per-row delete button, so the destructive action is never one
+// stray click away from the View button next to it.
+function renderHistory(page, handlers) {
+  const { runs, total, offset, limit } = page;
+  const { onView, onDeleteMany, onPage } = handlers;
+  const body = $("history-body");
+  body.replaceChildren();
+
+  if (!total) {
+    const empty = document.createElement("p");
+    empty.className = "history-empty muted";
+    empty.textContent = "No stored runs yet.";
+    body.appendChild(empty);
+    return;
+  }
+
+  // Selection is per page and reset whenever the page changes: a bulk delete
+  // must never remove a run the user cannot currently see.
+  const selected = new Set();
+
+  const toolbar = document.createElement("div");
+  toolbar.className = "history-toolbar";
+  const first = total ? offset + 1 : 0;
+  const last = Math.min(offset + limit, total);
+  toolbar.innerHTML = `
+    <button type="button" class="btn-danger" data-act="delete-selected" disabled>
+      Delete selected
+    </button>
+    <span class="history-range muted">${first}–${last} of ${total}</span>
+    <span class="history-pager">
+      <button type="button" class="btn-quiet" data-act="prev" ${offset <= 0 ? "disabled" : ""}>‹ Newer</button>
+      <button type="button" class="btn-quiet" data-act="next" ${last >= total ? "disabled" : ""}>Older ›</button>
+    </span>
+  `;
+  const bulkBtn = toolbar.querySelector('[data-act="delete-selected"]');
+  toolbar.querySelector('[data-act="prev"]').addEventListener("click", () =>
+    onPage(Math.max(0, offset - limit))
+  );
+  toolbar.querySelector('[data-act="next"]').addEventListener("click", () => onPage(offset + limit));
+
+  const table = document.createElement("table");
+  table.className = "history-table";
+  table.innerHTML = `
+    <thead>
+      <tr>
+        <th class="history-check">
+          <input type="checkbox" data-act="select-all" aria-label="Select all runs on this page" />
+        </th>
+        <th>run</th>
+        <th>files</th>
+        <th>tokens</th>
+        <th>model</th>
+        <th></th>
+      </tr>
+    </thead>
+  `;
+  const selectAll = table.querySelector('[data-act="select-all"]');
+
+  function syncSelectionUi() {
+    const n = selected.size;
+    bulkBtn.disabled = n === 0;
+    bulkBtn.textContent = n ? `Delete selected (${n})` : "Delete selected";
+    selectAll.checked = n > 0 && n === runs.length;
+    // Partial selection reads as neither on nor off, which is what the user has.
+    selectAll.indeterminate = n > 0 && n < runs.length;
+  }
+
+  const tbody = document.createElement("tbody");
+  for (const run of runs) {
+    const label = runLabel(run);
+    const tr = document.createElement("tr");
+    // Model ids are long inference-profile ARNs; the trailing segment is the
+    // part that distinguishes sonnet from haiku, which is all issue #1 needs.
+    const model = String(run.model_id).split(".").pop();
+    tr.innerHTML = `
+      <td class="history-check">
+        <input type="checkbox" data-act="select" aria-label="Select run from ${escapeHtml(label)}" />
+      </td>
+      <td class="history-when">${escapeHtml(label)}</td>
+      <td class="history-files">${escapeHtml(run.filenames.join(", "))}</td>
+      <td class="num">${run.token_count.toLocaleString()}</td>
+      <td class="muted">${escapeHtml(model)}</td>
+      <td class="history-actions">
+        <button type="button" class="btn-quiet" data-act="view">View</button>
+      </td>
+    `;
+    const box = tr.querySelector('[data-act="select"]');
+    box.addEventListener("change", () => {
+      box.checked ? selected.add(run.id) : selected.delete(run.id);
+      tr.classList.toggle("selected", box.checked);
+      syncSelectionUi();
+    });
+    tr.querySelector('[data-act="view"]').addEventListener("click", () => onView(run, label));
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+
+  selectAll.addEventListener("change", () => {
+    const on = selectAll.checked;
+    selected.clear();
+    tbody.querySelectorAll("tr").forEach((tr, i) => {
+      tr.querySelector('[data-act="select"]').checked = on;
+      tr.classList.toggle("selected", on);
+      if (on) selected.add(runs[i].id);
+    });
+    syncSelectionUi();
+  });
+
+  bulkBtn.addEventListener("click", () => {
+    const chosen = runs.filter((r) => selected.has(r.id));
+    if (chosen.length) onDeleteMany(chosen);
+  });
+
+  body.append(toolbar, table);
+  syncSelectionUi();
+}
+
 function escapeHtml(s) {
   return String(s)
     .replaceAll("&", "&amp;")
@@ -167,6 +316,115 @@ function main() {
   const processBtn = $("process-btn");
   const status = $("status");
   const reportRoot = $("report-root");
+  const history = $("history");
+
+  // Which stored run is on screen, so deleting it can clear the report rather
+  // than leave a table backed by rows that no longer exist.
+  let shownRunId = null;
+  let historyOffset = 0;
+
+  async function viewRun(run, label) {
+    setStatus(status, `Loading run from ${label}…`);
+    try {
+      const res = await fetch(`/api/runs/${run.id}/report`);
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        setStatus(status, body.detail || "Could not load that run.", true);
+        return;
+      }
+      const data = await res.json();
+      shownRunId = run.id;
+      renderReport(data, `Stored run from ${label} · ${run.filenames.join(", ")}`);
+      setStatus(status, `Showing stored run from ${label}.`);
+    } catch (e) {
+      setStatus(status, String(e), true);
+    }
+  }
+
+  // Clear the on-screen report if it was backed by a run that just went away.
+  function forgetIfShown(ids) {
+    if (shownRunId && ids.includes(shownRunId)) {
+      reportRoot.replaceChildren();
+      reportRoot.classList.add("hidden");
+      shownRunId = null;
+    }
+  }
+
+  async function deleteMany(runs) {
+    const tokens = runs.reduce((n, r) => n + r.token_count, 0);
+    // List them: the whole risk of a bulk delete is losing track of what is in
+    // the selection, so the confirm shows every run rather than just a count.
+    const lines = runs.map((r) => `  • ${runLabel(r)} — ${r.filenames.join(", ")}`).join("\n");
+    const ok = window.confirm(
+      `Delete ${runs.length} run${runs.length === 1 ? "" : "s"}?\n\n${lines}\n\n` +
+        `${tokens.toLocaleString()} tokens total. This cannot be undone.`
+    );
+    if (!ok) return;
+
+    setStatus(status, `Deleting ${runs.length} runs…`);
+    try {
+      const ids = runs.map((r) => r.id);
+      const res = await fetch("/api/runs/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        setStatus(status, body.detail || "Could not delete those runs.", true);
+        return;
+      }
+      // `deleted` is what the server actually removed, which can be shorter
+      // than `ids` if the selection had gone stale — report that, not the ask.
+      const { deleted, count } = await res.json();
+      forgetIfShown(deleted);
+      setStatus(status, `Deleted ${count} run${count === 1 ? "" : "s"}.`);
+      await loadHistory();
+    } catch (e) {
+      setStatus(status, String(e), true);
+    }
+  }
+
+  async function loadHistory(offset = historyOffset) {
+    // Only the fetch is guarded. Hiding the panel is the right answer to "there
+    // is no history to show" and the wrong answer to "rendering threw", which
+    // would otherwise make the whole feature vanish with nothing logged — so
+    // the render below sits outside this try deliberately.
+    let page;
+    try {
+      const res = await fetch(`/api/runs?limit=${PAGE_SIZE}&offset=${offset}`);
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        setStatus(status, body.detail || "Could not load run history.", true);
+        return;
+      }
+      page = await res.json();
+    } catch (e) {
+      setStatus(status, `Could not load run history: ${e}`, true);
+      return;
+    }
+
+    // Persistence off (LINGUA_PERSIST_RUNS=false) means there is no history to
+    // offer — hide the section rather than show an empty one that never fills.
+    // A store that failed to open answers 503 instead and is reported above.
+    if (!page.persistence) {
+      history.classList.add("hidden");
+      return;
+    }
+    // Deleting the last page's contents can strand the offset past the end;
+    // step back a page and re-fetch rather than render an empty table.
+    if (!page.runs.length && page.total > 0 && offset > 0) {
+      return loadHistory(Math.max(0, offset - PAGE_SIZE));
+    }
+    historyOffset = page.offset;
+    history.classList.remove("hidden");
+    $("history-count").textContent = page.total ? `${page.total} stored` : "";
+    renderHistory(page, {
+      onView: viewRun,
+      onDeleteMany: deleteMany,
+      onPage: (next) => loadHistory(next),
+    });
+  }
 
   fileInput.addEventListener("change", () => {
     const files = Array.from(fileInput.files || []);
@@ -249,7 +507,13 @@ function main() {
       if (finalData) {
         const names = finalData.file_reports?.map((f) => f.filename).join(", ") || "complete";
         setStatus(status, `Done in ${total}: ${names}`);
+        shownRunId = finalData.run_id || null;
         renderReport(finalData);
+        // The run just analyzed is now in the store and sorts to the top, so
+        // jump back to the first page rather than leaving the user wherever
+        // they had paged to.
+        historyOffset = 0;
+        loadHistory(0);
       } else {
         setStatus(status, `No report returned. · ${total}`, true);
       }
@@ -260,6 +524,8 @@ function main() {
       processBtn.disabled = false;
     }
   });
+
+  loadHistory();
 }
 
 main();

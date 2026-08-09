@@ -249,3 +249,178 @@ th.sortable.sort-desc::after {
 .greek {
   font-family: "Gentium Plus", "Times New Roman", "Palatino Linotype", Times, serif;
 }
+
+/* -- run history ----------------------------------------------------------
+   Deliberately low-contrast and collapsed by default. This is plumbing that
+   sits above the report, not another way of reading the text, so it borrows the
+   chapter-card shape but none of its weight — no fill, smaller type, muted
+   chrome — and stays one line tall until opened. Kept underweight so it does
+   not compete when the reading lenses arrive. */
+
+.history-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-top: 1.25rem;
+  font-size: 0.875rem;
+}
+
+.history-card summary {
+  cursor: pointer;
+  padding: 0.5rem 0.75rem;
+  list-style: none;
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+  color: var(--muted);
+}
+
+.history-card summary::-webkit-details-marker {
+  display: none;
+}
+
+.history-card summary::before {
+  content: "▸";
+  display: inline-block;
+  transition: transform 0.15s;
+}
+
+.history-card[open] summary::before {
+  transform: rotate(90deg);
+}
+
+.history-count {
+  font-size: 0.8125rem;
+}
+
+.history-body {
+  border-top: 1px solid var(--border);
+  overflow-x: auto;
+}
+
+/* Bulk actions left, position in the history right. Kept on one line so the
+   panel stays short — the report below it is the thing worth screen space. */
+.history-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.history-toolbar .btn-danger {
+  padding: 0.2rem 0.6rem;
+  font-size: 0.8125rem;
+  border-radius: 5px;
+}
+
+.history-range {
+  margin-left: auto;
+  font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.history-pager button {
+  padding: 0.2rem 0.55rem;
+  font-size: 0.8125rem;
+  border-radius: 5px;
+}
+
+.history-pager button + button {
+  margin-left: 0.25rem;
+}
+
+.history-check {
+  width: 1%;
+  padding-right: 0 !important;
+}
+
+.history-check input {
+  cursor: pointer;
+  margin: 0;
+  vertical-align: middle;
+}
+
+/* Selected rows need to beat the nth-child shading, hence the explicit pairing
+   rather than a bare .selected rule. */
+.history-table tbody tr.selected,
+.history-table tbody tr.selected:nth-child(even) {
+  background: var(--row-hover);
+}
+
+.history-empty {
+  margin: 0;
+  padding: 0.75rem;
+  font-size: 0.8125rem;
+}
+
+/* The report table sets a 1080px floor so its dozen columns never crush; this
+   one has six and must be free to size to the panel instead. */
+.history-table {
+  min-width: 0;
+  font-size: 0.8125rem;
+}
+
+.history-table th,
+.history-table td {
+  padding: 0.4rem 0.75rem;
+}
+
+.history-when {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* The one column that should wrap: a multi-file run lists every filename, and
+   letting it push the actions off-screen would be worse than two lines. */
+.history-files {
+  white-space: normal;
+  word-break: break-word;
+  min-width: 12rem;
+}
+
+.history-table .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.history-actions {
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* Row actions, sized down from the primary Process button. Only View lives
+   here — deleting is a toolbar action on a selection, never a per-row button
+   sitting one stray click away from it. */
+.history-actions button {
+  padding: 0.2rem 0.6rem;
+  font-size: 0.8125rem;
+  border-radius: 5px;
+}
+
+.btn-quiet,
+.btn-danger {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--fg);
+}
+
+.btn-quiet:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Muted until hover, so the one destructive control on screen does not sit
+   there shouting at a list the user is only reading. */
+.btn-danger {
+  color: var(--muted);
+}
+
+.btn-danger:hover {
+  border-color: var(--error);
+  color: var(--error);
+}
+
+.report-notice {
+  margin: 0 0 0.75rem;
+  font-size: 0.8125rem;
+}

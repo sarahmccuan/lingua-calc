@@ -42,6 +42,28 @@ Two consequences worth knowing:
 
 **Deliberately not pandas.** At learner-text scale (order 100k tokens) `Counter`/`dict` is milliseconds; a dataframe dependency would add real weight to the packaged build and buy nothing. What was wrong was the shape, not the arithmetic.
 
+## Run history
+
+The store was write-only from the app's point of view — runs accumulated but nothing read them back, so history existed only for a Python caller. Four routes in `app.py` are that surface, and `ui/` renders it as a collapsed panel above the report:
+
+| route | purpose |
+| --- | --- |
+| `GET /api/runs?limit=&offset=` | one page of runs, newest first, plus `total` |
+| `GET /api/runs/{id}/report` | re-derive a stored run — no Bedrock call |
+| `DELETE /api/runs/{id}` | remove one run (API surface; the UI does not use it) |
+| `POST /api/runs/delete` | remove a selection, one VACUUM for the batch |
+
+Because this is authoring software, **the same filename is re-run constantly and the store only ever appends** — `save_run` mints a fresh uuid per run and never upserts, so every draft survives. The cost is that two runs of `Chapter 5.docx` are distinguishable only by timestamp: nothing records *which version* was analyzed. The `note` column exists and is still unused; a content hash plus a label is the intended fix, and until then the timestamp is the identifier the UI leads with.
+
+Four decisions worth not re-litigating:
+
+- **Paged at 10, with `total` alongside.** An unpaged list silently ended at its limit, which reads as "that's all of them". Any truncation the UI shows must say what it dropped.
+- **`ORDER BY created_at DESC, id DESC`.** Windows' clock granularity (~15 ms) lets back-to-back runs share a timestamp to the microsecond. Without the tiebreak the sort is unstable, which under paging can show one run twice and hide another.
+- **Deleting is selection-then-confirm, never a per-row button.** The confirm lists every run by timestamp and filename rather than a count — losing track of what is in a selection is the whole risk — and selection resets on page change so a bulk delete can never remove rows the user cannot see.
+- **Delete vacuums, once per batch.** A bare `DELETE` frees pages to SQLite's freelist and leaves the file the same size, so "deleted" would reclaim nothing visible. VACUUM rewrites the file, so it runs once for the whole batch rather than per run. It runs *after* the commit and its failures are logged and swallowed: raising there would report "delete failed" for rows already gone.
+
+**A chapter that produced no tokens does not survive the round trip — deliberately.** Chapter identity rides on the fact rows, so a heading-only section has nowhere to be recorded and does not come back when the run is re-derived. That is the right answer: a chapter with no tokens is not a chapter, and none of the statistics this store exists to serve have anything to say about it. **Do not add a chapters table to preserve them.** The asymmetry that remains runs the other way — the fresh-analysis path passes `chapters=` from the placements it still holds, so it renders an empty card the reloaded report correctly omits. Cosmetic, and on the live side; not worth chasing.
+
 ## Grammar / morphology (issue #7)
 
 `parse` is a compact human label, and the model does not write it consistently. Across 31,902 logged tokens the same fact appeared under four spellings (`pres. act. ind. 3sg` / `pres. ind. 3sg` / `pres. ind. 3sg.` / `pres. act. ind. 3sg.`), gender alternated `fem.`/`f.`, articles alternated `def. art.`/`definite article`, and **28% of verb tokens omitted voice entirely**. Counting grammar by matching that string undercounts silently, and "0 futures" becomes indistinguishable from "futures spelled differently".
