@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Lingua Calc</title>
-    <link rel="stylesheet" href="/styles.css?v=3" />
+    <link rel="stylesheet" href="/styles.css?v=6" />
   </head>
   <body>
     <header class="app-header">
@@ -22,9 +22,21 @@
         <p id="status" class="status muted" role="status"></p>
       </section>
 
+      <!-- Collapsed by default: history is plumbing, not one of the reading
+           lenses issue #7 proposes, so it stays a single quiet line until
+           asked for. (Note #7 is filed as the grammar-tracking issue; the
+           lenses are in its discussion, not in CONTEXT.md's #7 section.) -->
+      <details id="history" class="history-card hidden">
+        <summary>
+          <span>Run history</span>
+          <span id="history-count" class="history-count"></span>
+        </summary>
+        <div id="history-body" class="history-body"></div>
+      </details>
+
       <section id="report-root" class="report-root hidden" aria-label="Report"></section>
     </main>
 
-    <script type="module" src="/app.js?v=3"></script>
+    <script type="module" src="/app.js?v=6"></script>
   </body>
 </html>

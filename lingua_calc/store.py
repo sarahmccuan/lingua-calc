@@ -227,16 +227,90 @@ class TokenStore:
         return len(facts)
 
     def delete_run(self, run_id: str) -> None:
+        """Remove one run and reclaim its disk."""
+        self.delete_runs([run_id])
+
+    def delete_runs(self, run_ids: Sequence[str]) -> list[str]:
+        """Remove several runs, then reclaim disk **once**.
+
+        The ``VACUUM`` is the point of deleting at all: a bare ``DELETE`` moves
+        the freed pages onto SQLite's freelist for reuse but leaves the file
+        exactly as large as it was, so a run the user was told is gone would free
+        nothing they can see.
+
+        It is also why this takes a list. Vacuuming rewrites the whole database,
+        so doing it per run would make clearing ten runs ten full rewrites of a
+        file that is only getting smaller — quadratic work for no benefit. One
+        transaction, one rewrite.
+
+        Returns the ids actually removed, which is not always the ids asked for:
+        ones that no longer exist are skipped rather than raising, so a stale
+        selection cannot fail the whole batch. Callers report this list rather
+        than their own request, or they claim deletions that never happened.
+        """
+        ids = list(dict.fromkeys(run_ids))  # de-dupe, keep order
+        if not ids:
+            return []
+
+        placeholders = ", ".join("?" * len(ids))
         with self._connect() as conn:
-            conn.execute("DELETE FROM token_facts WHERE run_id = ?", (run_id,))
-            conn.execute("DELETE FROM runs WHERE id = ?", (run_id,))
+            present = [
+                row["id"]
+                for row in conn.execute(
+                    f"SELECT id FROM runs WHERE id IN ({placeholders})", ids
+                )
+            ]
+            if present:
+                marks = ", ".join("?" * len(present))
+                conn.execute(f"DELETE FROM token_facts WHERE run_id IN ({marks})", present)
+                conn.execute(f"DELETE FROM runs WHERE id IN ({marks})", present)
+        if present:
+            self.vacuum()
+        return present
+
+    def vacuum(self) -> None:
+        """Rewrite the database file, dropping freed pages.
+
+        Needs its own connection with autocommit on: ``_connect`` leaves an
+        implicit transaction open after DML, and SQLite refuses to VACUUM from
+        inside a transaction.
+
+        Failures are logged and swallowed, for the same reason
+        ``save_run_safely`` swallows write failures: this runs *after* the
+        delete has committed, so raising here would report "delete failed" for
+        rows that are already gone — the one message guaranteed to be wrong.
+        A database that could not be vacuumed is merely larger than it needs to
+        be, and the next successful delete reclaims the space.
+        """
+        try:
+            conn = sqlite3.connect(self.path, isolation_level=None)
+            try:
+                conn.execute("VACUUM")
+            finally:
+                conn.close()
+        except Exception:
+            logger.exception("Could not vacuum %s; space will be reclaimed later", self.path)
 
     # -- reading --------------------------------------------------------
 
-    def list_runs(self, limit: int = 50) -> list[RunInfo]:
+    def count_runs(self) -> int:
+        """Total stored runs, independent of any page. Needed so a paged view can
+        show its range against the real count rather than silently ending at
+        whatever the limit was."""
+        with self._connect() as conn:
+            return conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
+
+    def list_runs(self, limit: int = 50, offset: int = 0) -> list[RunInfo]:
+        # `id` breaks ties: the clock granularity on Windows is coarse enough
+        # (~15ms) that runs saved back-to-back can share a timestamp to the
+        # microsecond, and `created_at` alone would then order them arbitrarily
+        # — which shows up as history rows swapping places between reloads. With
+        # paging it would be worse than cosmetic: an unstable sort can show the
+        # same run on two pages and hide another entirely.
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM runs ORDER BY created_at DESC LIMIT ?", (limit,)
+                "SELECT * FROM runs ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+                (limit, offset),
             ).fetchall()
         return [_run_info(r) for r in rows]
 
@@ -260,7 +334,20 @@ class TokenStore:
         return [TokenFact(**dict(r)) for r in rows]
 
     def load_index(self, run_id: str) -> CorpusIndex:
-        """Rebuild a queryable index from a stored run — no provider call."""
+        """Rebuild a queryable index from a stored run — no provider call.
+
+        A chapter that produced no tokens does not survive the round trip, and
+        that is fine: chapter identity rides on the fact rows, so a heading-only
+        section has nowhere to be recorded and simply does not come back. **A
+        chapter with no tokens is not a chapter** — there is nothing in it to
+        count, and no statistic this store exists to serve has an answer for it.
+
+        So this is a decision, not a gap to close. Do not add a chapters table
+        to "fix" it. The live path is the inconsistent one — it passes
+        ``chapters=`` from the placements it still holds and therefore renders
+        an empty card — but that is a cosmetic quirk of the fresh render, not a
+        loss here.
+        """
         return CorpusIndex(self.load_facts(run_id))
 
 

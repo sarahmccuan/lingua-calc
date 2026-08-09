@@ -158,7 +158,13 @@ def build_file_reports(index: CorpusIndex) -> list[FileReport]:
     return file_reports
 
 
-def _open_store(settings: Settings) -> TokenStore | None:
+def open_store(settings: Settings) -> TokenStore | None:
+    """Open the run store, or return ``None`` if history is off/unavailable.
+
+    Public because the HTTP layer needs the same "persistence is optional"
+    handling the pipeline uses — the run-history endpoints have to degrade to
+    "no history" rather than 500 on a read-only install.
+    """
     if not settings.persist_runs:
         return None
     try:
@@ -200,7 +206,7 @@ def analyze_docx_files(
     index = CorpusIndex(facts, chapters=_chapter_refs(placements))
 
     run_id = save_run_safely(
-        _open_store(settings),
+        open_store(settings),
         facts,
         model_id=settings.bedrock_model_id,
         filenames=[name for name, _ in ordered_files],
@@ -233,7 +239,7 @@ def reports_from_run(
     new columns and export grains can be developed against real data for free.
     """
     settings = settings or get_settings()
-    store = store or _open_store(settings)
+    store = store or open_store(settings)
     if store is None or store.get_run(run_id) is None:
         return None
     index = store.load_index(run_id)
