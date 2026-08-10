@@ -126,6 +126,127 @@ function renderChapter(ch, root) {
   root.appendChild(details);
 }
 
+// -- CSV export (issue #3) --------------------------------------------------
+//
+// Exporting is a per-run action, so it lives on the run in the history table
+// rather than on the report: you can pull the CSV for any stored run without
+// first rendering it, and without disturbing whatever is already on screen.
+//
+// Built in the browser from `GET /api/runs/{id}/report` rather than from a
+// dedicated `export.csv` route. That response *is* the displayed grain, so
+// there is nothing extra to derive server-side, and re-deriving it is free —
+// no provider call. The cost of this placement is that a report reachable
+// without a stored run behind it (LINGUA_PERSIST_RUNS=false hides history
+// entirely) has no export path; re-enable persistence to export.
+//
+// Grain is one row per chapter × lemma × parse: the rows the table shows, with
+// the file/chapter they belong to spliced in so the whole corpus lands in a
+// single flat file that pivots. Order is report order (first appearance in the
+// chapter), not whatever the on-screen sort happens to be — the sort is a
+// reading aid, and a spreadsheet re-sorts anyway.
+
+const EXPORT_HEADER = [
+  "file",
+  "chapter_index",
+  "chapter_id",
+  "chapter_title",
+  "type",
+  "lemma",
+  "form",
+  "parse",
+  "lemma_occ",
+  "parse_occ",
+  "form_occ",
+  "first_occ_lemma",
+  "first_occ_parse",
+  "last_occ_lemma",
+  "last_occ_parse",
+  "lemma_first_chapter",
+  "lemma_last_chapter",
+  "parse_first_chapter",
+  "parse_last_chapter",
+];
+
+// `chapter_index` and the four `*_chapter` columns are the model's 0-based
+// corpus-wide indexes, left raw so they compare against each other: a row is a
+// lemma's first appearance exactly when lemma_first_chapter == chapter_index.
+// The booleans alongside them are that comparison already done, because "is
+// this the first time?" is the question the author actually asks.
+function exportRows(data) {
+  const rows = [];
+  for (const fileRep of data.file_reports || []) {
+    for (const ch of fileRep.chapters) {
+      for (const r of ch.rows) {
+        rows.push([
+          fileRep.filename,
+          ch.summary.chapter_index,
+          ch.summary.id,
+          ch.summary.title,
+          r.type,
+          r.lemma,
+          r.form,
+          r.parse,
+          r.lemma_occ,
+          r.parse_occ,
+          r.form_occ,
+          r.first_occ_lemma,
+          r.first_occ_parse,
+          r.last_occ_lemma,
+          r.last_occ_parse,
+          r.lemma_first_chapter,
+          r.lemma_last_chapter,
+          r.parse_first_chapter,
+          r.parse_last_chapter,
+        ]);
+      }
+    }
+  }
+  return rows;
+}
+
+function csvCell(value) {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "boolean") return value ? "TRUE" : "FALSE";
+  const s = String(value);
+  return /["\r\n,]/.test(s) ? `"${s.replaceAll('"', '""')}"` : s;
+}
+
+function toCsv(header, rows) {
+  // CRLF per RFC 4180; Excel is the likeliest destination and is happiest with it.
+  return [header, ...rows].map((row) => row.map(csvCell).join(",")).join("\r\n") + "\r\n";
+}
+
+function exportFilename(data) {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, "0");
+  const stamp = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`;
+  const names = (data.file_reports || []).map((f) => f.filename.replace(/\.docx$/i, ""));
+  // One source file names the export after it; several would make an unreadable
+  // filename, so they fall back to a count.
+  const base =
+    names.length === 1
+      ? names[0].replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-|-$/g, "")
+      : `${names.length}-files`;
+  return `lingua-calc-${base || "report"}-${stamp}.csv`;
+}
+
+function downloadCsv(filename, text) {
+  // Every lemma and form in here is Greek, and Excel reads a BOM-less UTF-8 CSV
+  // as the local codepage — i.e. as mojibake. The leading U+FEFF is what makes
+  // the file openable by double-click rather than through the import wizard.
+  // Spelled as a char code so the BOM cannot be lost to an editor or a tool
+  // that strips it from source on save.
+  const blob = new Blob([String.fromCharCode(0xfeff), text], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
 function renderReport(data, notice = null) {
   const root = $("report-root");
   root.classList.remove("hidden");
@@ -186,10 +307,10 @@ const PAGE_SIZE = 10;
 
 // Deleting is a selection-then-act flow only: tick the rows, confirm the list.
 // There is no per-row delete button, so the destructive action is never one
-// stray click away from the View button next to it.
+// stray click away from the View and Export buttons next to it.
 function renderHistory(page, handlers) {
   const { runs, total, offset, limit } = page;
-  const { onView, onDeleteMany, onPage } = handlers;
+  const { onView, onExport, onDeleteMany, onPage } = handlers;
   const body = $("history-body");
   body.replaceChildren();
 
@@ -269,6 +390,7 @@ function renderHistory(page, handlers) {
       <td class="muted">${escapeHtml(model)}</td>
       <td class="history-actions">
         <button type="button" class="btn-quiet" data-act="view">View</button>
+        <button type="button" class="btn-quiet" data-act="export">Export CSV</button>
       </td>
     `;
     const box = tr.querySelector('[data-act="select"]');
@@ -278,6 +400,19 @@ function renderHistory(page, handlers) {
       syncSelectionUi();
     });
     tr.querySelector('[data-act="view"]').addEventListener("click", () => onView(run, label));
+
+    // Export has to fetch the run's report first, which on a large run is not
+    // instant — hold the button down for the round trip so a second click
+    // cannot start a second download of the same thing.
+    const exportBtn = tr.querySelector('[data-act="export"]');
+    exportBtn.addEventListener("click", async () => {
+      exportBtn.disabled = true;
+      try {
+        await onExport(run, label);
+      } finally {
+        exportBtn.disabled = false;
+      }
+    });
     tbody.appendChild(tr);
   }
   table.appendChild(tbody);
@@ -336,6 +471,31 @@ function main() {
       shownRunId = run.id;
       renderReport(data, `Stored run from ${label} · ${run.filenames.join(", ")}`);
       setStatus(status, `Showing stored run from ${label}.`);
+    } catch (e) {
+      setStatus(status, String(e), true);
+    }
+  }
+
+  // Deliberately does not call renderReport: exporting a run is not a request
+  // to look at it, and swapping the report out from under the reader would be a
+  // surprising side effect of asking for a download.
+  async function exportRun(run, label) {
+    setStatus(status, `Building CSV for ${label}…`);
+    try {
+      const res = await fetch(`/api/runs/${run.id}/report`);
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        setStatus(status, body.detail || "Could not load that run.", true);
+        return;
+      }
+      const data = await res.json();
+      const rows = exportRows(data);
+      if (!rows.length) {
+        setStatus(status, `That run has no rows to export.`, true);
+        return;
+      }
+      downloadCsv(exportFilename(data), toCsv(EXPORT_HEADER, rows));
+      setStatus(status, `Exported ${rows.length.toLocaleString()} rows from ${label}.`);
     } catch (e) {
       setStatus(status, String(e), true);
     }
@@ -421,6 +581,7 @@ function main() {
     $("history-count").textContent = page.total ? `${page.total} stored` : "";
     renderHistory(page, {
       onView: viewRun,
+      onExport: exportRun,
       onDeleteMany: deleteMany,
       onPage: (next) => loadHistory(next),
     });

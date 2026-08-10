@@ -388,13 +388,17 @@ th.sortable.sort-desc::after {
   white-space: nowrap;
 }
 
-/* Row actions, sized down from the primary Process button. Only View lives
-   here — deleting is a toolbar action on a selection, never a per-row button
-   sitting one stray click away from it. */
+/* Row actions, sized down from the primary Process button. Only the two
+   read-only actions live here — deleting is a toolbar action on a selection,
+   never a per-row button sitting one stray click away from them. */
 .history-actions button {
   padding: 0.2rem 0.6rem;
   font-size: 0.8125rem;
   border-radius: 5px;
+}
+
+.history-actions button + button {
+  margin-left: 0.4rem;
 }
 
 .btn-quiet,

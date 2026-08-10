@@ -64,6 +64,27 @@ Four decisions worth not re-litigating:
 
 **A chapter that produced no tokens does not survive the round trip — deliberately.** Chapter identity rides on the fact rows, so a heading-only section has nowhere to be recorded and does not come back when the run is re-derived. That is the right answer: a chapter with no tokens is not a chapter, and none of the statistics this store exists to serve have anything to say about it. **Do not add a chapters table to preserve them.** The asymmetry that remains runs the other way — the fresh-analysis path passes `chapters=` from the placements it still holds, so it renders an empty card the reloaded report correctly omits. Cosmetic, and on the live side; not worth chasing.
 
+## Export (issue #3)
+
+Every row of the run-history table carries an **Export CSV** button beside its **View** button. One file, one grain: **one row per chapter × lemma × parse** — the rows the report table shows, with the file and chapter they belong to spliced in so the whole corpus lands in a single flat sheet that pivots.
+
+| group | columns |
+| --- | --- |
+| identity | `file`, `chapter_index`, `chapter_id`, `chapter_title` |
+| row | `type`, `lemma`, `form`, `parse` |
+| counts (this chapter) | `lemma_occ`, `parse_occ`, `form_occ` |
+| occurrence (this chapter) | `first_occ_lemma`, `first_occ_parse`, `last_occ_lemma`, `last_occ_parse` |
+| occurrence (corpus-wide) | `lemma_first_chapter`, `lemma_last_chapter`, `parse_first_chapter`, `parse_last_chapter` |
+
+- **On the run, not on the report.** Exporting is a per-run action, so any stored run can be pulled as CSV without first rendering it, and doing so does not disturb whatever report is already on screen. The cost: with `LINGUA_PERSIST_RUNS=false` the history panel is hidden entirely, so there is no export path at all — re-enable persistence to export.
+- **Built in the browser from `GET /api/runs/{id}/report`, not by a dedicated route.** That response *is* the displayed grain, so there is nothing extra to derive server-side, and re-deriving it costs nothing — no provider call.
+- **The `*_chapter` columns are the model's raw 0-based indexes**, left uncooked so they compare against `chapter_index`: a row is a lemma's first appearance exactly when `lemma_first_chapter == chapter_index`. The booleans beside them are that comparison already done, because "is this the first time?" is the question actually being asked.
+- **UTF-8 with a BOM, CRLF rows.** Every lemma and form is Greek and Excel reads a BOM-less UTF-8 CSV as the local codepage, i.e. as mojibake. The BOM is what makes the file openable by double-click instead of through the import wizard.
+- **Report order, not screen order.** The column sort is a reading aid; a spreadsheet re-sorts anyway.
+- **Not yet:** per-chapter or per-file downloads, an Excel workbook with a tab per chapter, and the form-level breakdown on `TokenRow.forms` (a second grain, so a second file — not more columns on this one).
+
+Note `chapter_id` is near-useless for Greek titles: `pipeline._slugify` strips non-ASCII, so `Κεφάλαιον α’` becomes `1--`. It is exported anyway because it is the id the rest of the system keys by; `chapter_index` is the column to join on.
+
 ## Grammar / morphology (issue #7)
 
 `parse` is a compact human label, and the model does not write it consistently. Across 31,902 logged tokens the same fact appeared under four spellings (`pres. act. ind. 3sg` / `pres. ind. 3sg` / `pres. ind. 3sg.` / `pres. act. ind. 3sg.`), gender alternated `fem.`/`f.`, articles alternated `def. art.`/`definite article`, and **28% of verb tokens omitted voice entirely**. Counting grammar by matching that string undercounts silently, and "0 futures" becomes indistinguishable from "futures spelled differently".
