@@ -5,17 +5,439 @@ function setStatus(el, text, isError = false) {
   el.classList.toggle("error", isError);
 }
 
-const ORDINAL_COL = 0;
+// -- sortable tables --------------------------------------------------------
+//
+// One table implementation, shared by the chapter table and the text table.
+// The previous one sorted by reading cell text back out of the DOM, so every
+// numeric or boolean column had to be registered in a hard-coded set of column
+// indexes — which silently mis-sorts the moment a column is inserted, and issue
+// #4 inserts four. Columns now declare their own accessor and kind and the sort
+// runs over the data, so adding a column is one entry in a list.
+//
+// `get` is the sort key and, unless `text` overrides it, the displayed value.
 
-// The "#" column is a running count of what is on screen, not a property of the
-// row: it always reads 1..N top to bottom, so it is rewritten after every sort.
-function renumber(tbody) {
-  Array.from(tbody.rows).forEach((tr, i) => {
-    tr.cells[ORDINAL_COL].textContent = String(i + 1);
-  });
+function cellText(col, row) {
+  if (col.text) return col.text(row);
+  const v = col.get(row);
+  if (col.type === "bool") return v ? "yes" : "";
+  return v === null || v === undefined ? "" : String(v);
 }
 
-function renderChapter(ch, root) {
+function compareBy(col, a, b) {
+  const va = col.get(a);
+  const vb = col.get(b);
+  if (col.type === "num") return (va || 0) - (vb || 0);
+  if (col.type === "bool") return (va ? 1 : 0) - (vb ? 1 : 0);
+  return String(va ?? "").localeCompare(String(vb ?? ""), undefined, { sensitivity: "base" });
+}
+
+function buildTable(columns, rows, { className = "", rowClass = null } = {}) {
+  // Three levels, not two: the indicator sits *outside* the scrolling wrap.
+  // Inside it, it scrolls sideways with a wide table, and — where the wrap also
+  // scrolls vertically, as the combination table does — it pushes the sticky
+  // header down by its own height and lets rows paint in the gap above it.
+  const block = document.createElement("div");
+  block.className = "table-block";
+
+  const wrap = document.createElement("div");
+  wrap.className = "table-wrap";
+
+  const indicator = document.createElement("div");
+  indicator.className = "sort-indicator muted";
+
+  const table = document.createElement("table");
+  if (className) table.className = className;
+  const thead = document.createElement("thead");
+  const headRow = document.createElement("tr");
+
+  // The ordinal is a running count of what is on screen, not a property of the
+  // row: it always reads 1..N top to bottom, so there is nothing in it to sort
+  // by and it is re-derived on every render.
+  const ordinal = document.createElement("th");
+  ordinal.className = "row-num";
+  ordinal.textContent = "#";
+  headRow.appendChild(ordinal);
+
+  // Alignment follows `type` unless a column overrides it. The one case that
+  // needs the override is a text column sorted by a hidden numeric key — the
+  // form-combination column, which displays a label but sorts by paradigm
+  // position so that re-sorting on it lays the conjugation out in order.
+  const alignOf = (col) => (col.align !== undefined ? col.align : col.type === "num" ? "num" : "");
+
+  const ths = columns.map((col) => {
+    const th = document.createElement("th");
+    th.textContent = col.label;
+    th.className = "sortable";
+    if (col.title) th.title = col.title;
+    if (alignOf(col) === "num") th.classList.add("num");
+    headRow.appendChild(th);
+    return th;
+  });
+  thead.appendChild(headRow);
+
+  const tbody = document.createElement("tbody");
+
+  function paint(ordered) {
+    tbody.replaceChildren();
+    const frag = document.createDocumentFragment();
+    ordered.forEach((row, i) => {
+      const tr = document.createElement("tr");
+      if (rowClass) {
+        const cls = rowClass(row);
+        if (cls) tr.className = cls;
+      }
+      const cells = [`<td class="row-num">${i + 1}</td>`];
+      for (const col of columns) {
+        const classes = [col.cls, alignOf(col) === "num" ? "num" : null].filter(Boolean).join(" ");
+        const title = col.cellTitle ? ` title="${escapeHtml(col.cellTitle(row))}"` : "";
+        cells.push(`<td${classes ? ` class="${classes}"` : ""}${title}>${escapeHtml(cellText(col, row))}</td>`);
+      }
+      tr.innerHTML = cells.join("");
+      frag.appendChild(tr);
+    });
+    tbody.appendChild(frag);
+  }
+
+  let current = rows.slice();
+  paint(current);
+
+  ths.forEach((th, i) => {
+    th.addEventListener("click", () => {
+      const asc = !th.classList.contains("sort-asc");
+      ths.forEach((t) => t.classList.remove("sort-asc", "sort-desc"));
+      th.classList.add(asc ? "sort-asc" : "sort-desc");
+      const col = columns[i];
+      current = rows.slice().sort((a, b) => (asc ? 1 : -1) * compareBy(col, a, b));
+      paint(current);
+      indicator.textContent = `Sorted by ${col.label} (${asc ? "asc" : "desc"})`;
+    });
+  });
+
+  table.append(thead, tbody);
+  wrap.appendChild(table);
+  block.append(indicator, wrap);
+  return block;
+}
+
+// -- grammatical form summary (issues #7 / #14) -----------------------------
+//
+// Rendered as one card per feature dimension rather than one long list, because
+// the question is always asked within a dimension ("how many aorists", "how
+// many datives") and a single ranked list would interleave them.
+//
+// Zero rows are kept on purpose — "0 futures in this chapter" is the answer to
+// issue #7's question, and dropping the row would make it unaskable. The
+// backend supplies the expected vocabulary for exactly this reason.
+
+function pct(x) {
+  return `${(x * 100).toFixed(x === 1 || x === 0 ? 0 : 1)}%`;
+}
+
+// Grammar counts are only as good as the share of labels the normalizer could
+// read, so this rides along with every profile. Without it an unparsed label is
+// indistinguishable from grammar the text does not contain — which is the exact
+// trap that made counting off the raw parse string unsafe.
+function coverageNote(cov) {
+  const el = document.createElement("p");
+  el.className = "coverage-note muted";
+  if (!cov) return el;
+  const parts = [`${pct(cov.understood_share)} of morphology decoded`];
+  if (cov.needs_attention) parts.push(`${cov.needs_attention} labels need attention`);
+  if (cov.verb_forms) {
+    parts.push(
+      cov.verbs_missing_voice
+        ? `voice missing on ${cov.verbs_missing_voice} of ${cov.verb_forms} verb forms`
+        : `voice stated on all ${cov.verb_forms} verb forms`
+    );
+  }
+  el.textContent = parts.join(" · ");
+  if (cov.needs_attention || cov.voice_gap_share > 0.05) el.classList.add("warn");
+  return el;
+}
+
+// -- form combinations ------------------------------------------------------
+//
+// The complement to the per-dimension cards. Those say "212 aorists"; this says
+// which aorists — "aor. act. ind. 3sg" as one row and "aor. mid. part. nom. sg.
+// masc." as another. A learner meets whole forms, not features, so two cells of
+// the paradigm are two things to introduce even though both count as one
+// aorist each above.
+//
+// Two properties the cards do not have:
+//   - These rows PARTITION. Every token carries exactly one combination, so the
+//     column sums to the tokens carrying morphology. A syncretic form lands in
+//     one row that says so ("nom./acc.") rather than being counted twice.
+//   - They cannot be zero-filled against the language. Greek's full cross
+//     product is thousands of cells almost none of which any text contains, so
+//     the row set is what the *corpus* attests. A chapter therefore carries an
+//     explicit zero for a form the text uses elsewhere, which is the "no aorist
+//     participles here" reading; forms the whole text lacks have no row at all.
+
+function combinationColumns(scope, labels) {
+  const cols = [
+    {
+      label: "form",
+      // Displays the label, sorts by paradigm position — so clicking this
+      // header lays the conjugation out in order instead of alphabetising it
+      // into "aor." before "impf." before "pres.".
+      get: (r) => r.order,
+      text: (r) => r.form,
+      type: "num",
+      align: "",
+      title: "the whole feature combination; sorts in paradigm order",
+    },
+  ];
+  if (scope === "chapter") {
+    cols.push(
+      { label: "here", get: (r) => r.occ, type: "num" },
+      { label: "cum.", get: (r) => r.cumulative, type: "num", title: "occurrences from the start of the text through this chapter" },
+      { label: "new", get: (r) => r.isNew, type: "bool", title: "this form appears for the first time in this chapter" }
+    );
+  } else {
+    cols.push(
+      { label: "total", get: (r) => r.occ, type: "num" },
+      { label: "# chs", get: (r) => r.chapter_count, type: "num", title: "distinct chapters this form appears in" },
+      {
+        label: "1st ch",
+        get: (r) => r.first_chapter,
+        type: "num",
+        text: (r) => labels.short(r.first_chapter),
+        cellTitle: (r) => labels.long(r.first_chapter),
+        title: "chapter this form is introduced in",
+      },
+      {
+        label: "last ch",
+        get: (r) => r.last_chapter,
+        type: "num",
+        text: (r) => labels.short(r.last_chapter),
+        cellTitle: (r) => labels.long(r.last_chapter),
+      }
+    );
+  }
+  return cols;
+}
+
+// The chapter view's table, rebuilt from the corpus inventory plus this
+// chapter's two numbers per row. The inventory travels once because every other
+// field on a row — the label, its paradigm position, the chapters it spans — is
+// corpus-wide and cannot vary by chapter; see `CombinationCount`. Group and
+// table totals are re-derived rather than sent, because these rows partition:
+// the tokens in a class are exactly the sum of its `occ`.
+function chapterCombinations(inventory, counts) {
+  if (!inventory || !inventory.groups.length) return null;
+  const byOrder = new Map((counts || []).map((c) => [c.order, c]));
+  const groups = inventory.groups.map((g) => {
+    // A row with no entry is one the text has not reached yet, which the
+    // server omits rather than sending a pair of zeros for.
+    const rows = g.rows.map((r) => {
+      const c = byOrder.get(r.order);
+      return { ...r, occ: c ? c.occ : 0, cumulative: c ? c.cumulative : 0 };
+    });
+    return {
+      ...g,
+      rows,
+      tokens: rows.reduce((n, r) => n + r.occ, 0),
+      tokens_cumulative: rows.reduce((n, r) => n + r.cumulative, 0),
+    };
+  });
+  return {
+    groups,
+    tokens: groups.reduce((n, g) => n + g.tokens, 0),
+    tokens_cumulative: groups.reduce((n, g) => n + g.tokens_cumulative, 0),
+  };
+}
+
+function renderCombinations(table, scope, chapterIndex, labels) {
+  const section = document.createElement("div");
+  section.className = "combinations";
+  if (!table || !table.groups.length) return section;
+
+  // One table per form class. A single ranked list interleaves paradigms that
+  // were never meant to be compared — "which tenses am I using" and "which
+  // cases am I using" are different questions, and a participle answers to
+  // neither, which is why it gets a table of its own.
+  const groups = table.groups.map((g) => ({
+    ...g,
+    rows: g.rows.map((r) => ({ ...r, isNew: r.first_chapter === chapterIndex && r.occ > 0 })),
+  }));
+  const presentCount = groups.reduce((n, g) => n + g.rows.filter((r) => r.occ > 0).length, 0);
+  const absentCount = groups.reduce((n, g) => n + g.rows.filter((r) => !r.occ).length, 0);
+
+  const head = document.createElement("div");
+  head.className = "combinations-head";
+  head.innerHTML = `
+    <h4>Form combinations</h4>
+    <span class="muted">${presentCount} here · ${table.tokens.toLocaleString()} tokens</span>
+  `;
+
+  const grid = document.createElement("div");
+  grid.className = "combinations-grid";
+
+  // One control for all three tables: "should I see the forms this chapter
+  // lacks" is a single question, and three checkboxes would make it look like
+  // three. Absent rows are the "no aorist participles in this chapter"
+  // reading, and on a long text they outnumber the present ones — so they are
+  // available rather than default, and the control names its own count so
+  // nothing is hidden silently.
+  let showAbsent = false;
+  if (absentCount > 0) {
+    const toggle = document.createElement("label");
+    toggle.className = "combinations-toggle muted";
+    toggle.innerHTML = `<input type="checkbox" /> show ${absentCount} form${absentCount === 1 ? "" : "s"} the text uses elsewhere`;
+    head.appendChild(toggle);
+    toggle.querySelector("input").addEventListener("change", (e) => {
+      showAbsent = e.target.checked;
+      draw();
+    });
+  }
+
+  const slots = groups.map((group) => {
+    const card = document.createElement("div");
+    card.className = "combinations-card";
+    const label = document.createElement("div");
+    label.className = "combinations-card-head";
+    label.innerHTML = `
+      <span class="combinations-class"${group.hint ? ` title="${escapeHtml(group.hint)}"` : ""}>${escapeHtml(group.label)}</span>
+      <span class="muted"></span>
+    `;
+    const slot = document.createElement("div");
+    card.append(label, slot);
+    grid.appendChild(card);
+    return { group, slot, count: label.querySelector(".muted") };
+  });
+
+  function draw() {
+    for (const { group, slot, count } of slots) {
+      const rows = showAbsent ? group.rows : group.rows.filter((r) => r.occ > 0);
+      count.textContent = `${rows.length} form${rows.length === 1 ? "" : "s"} · ${group.tokens.toLocaleString()} tokens`;
+      if (!rows.length) {
+        // The card stays. Which classes exist is decided corpus-wide, so a
+        // chapter with no participles says so rather than quietly losing the
+        // table and leaving the author to notice it is missing.
+        const empty = document.createElement("p");
+        empty.className = "combinations-empty muted";
+        empty.textContent = "None in this chapter.";
+        slot.replaceChildren(empty);
+        continue;
+      }
+      // Frequency first, paradigm order to break ties — the same default the
+      // vocabulary table uses, and every header re-sorts.
+      const ordered = rows.slice().sort((a, b) => b.occ - a.occ || a.order - b.order);
+      slot.replaceChildren(
+        buildTable(combinationColumns(scope, labels), ordered, {
+          className: "table-narrow",
+          // Same treatment the dimension cards give a zero: present, because
+          // "not in this chapter" is an answer, but quiet, because the rows
+          // carrying a count are the ones being read.
+          rowClass: (r) => (r.occ ? "" : "zero"),
+        })
+      );
+    }
+  }
+  draw();
+
+  section.append(head, grid);
+  return section;
+}
+
+// `scope` is "chapter" (this chapter's count beside the running total) or
+// "text" (corpus totals plus where each form lives). `combinations` is the
+// combination table for this scope, passed in rather than read off `source`
+// because only the text report carries one — a chapter's is rebuilt from it.
+function renderGrammar(source, scope, { chapterIndex = null, labels = null, combinations = null } = {}) {
+  const groups = source.grammar;
+  const section = document.createElement("section");
+  section.className = "grammar";
+
+  const head = document.createElement("div");
+  head.className = "grammar-head";
+  const title = document.createElement("h3");
+  title.textContent = "Grammatical forms";
+  head.append(title, coverageNote(source.coverage));
+  section.appendChild(head);
+
+  if (!groups || !groups.length) {
+    const empty = document.createElement("p");
+    empty.className = "muted";
+    empty.textContent = "No morphology was decoded here.";
+    section.appendChild(empty);
+    return section;
+  }
+
+  const grid = document.createElement("div");
+  grid.className = "grammar-grid";
+
+  for (const group of groups) {
+    const card = document.createElement("div");
+    card.className = "grammar-card";
+
+    const isChapter = scope === "chapter";
+    // Not the sum of the rows below it: a syncretic nom./acc. is counted under
+    // both readings, so the rows can add up past the tokens involved. This is
+    // the honest denominator.
+    const stated = isChapter
+      ? `${group.stated} here · ${group.stated_cumulative} so far`
+      : `${group.stated} tokens`;
+
+    const rows = group.stats
+      .map((s) => {
+        const isNew = isChapter && s.occ > 0 && s.first_chapter === chapterIndex;
+        const right = isChapter
+          ? `<td class="num">${s.occ}</td><td class="num muted">${s.cumulative}</td>`
+          : `<td class="num">${s.occ}</td><td class="num muted">${s.chapter_count}</td>`;
+        return `<tr class="${s.occ ? "" : "zero"}">
+          <td>${escapeHtml(s.label)}${isNew ? ' <span class="badge-new" title="first appears in this chapter">new</span>' : ""}</td>
+          ${right}
+        </tr>`;
+      })
+      .join("");
+
+    card.innerHTML = `
+      <div class="grammar-card-head">
+        <span class="grammar-dimension">${escapeHtml(group.label)}</span>
+        <span class="muted">${escapeHtml(stated)}</span>
+      </div>
+      <table class="grammar-table">
+        <thead><tr>
+          <th>${escapeHtml(group.label.toLowerCase())}</th>
+          <th class="num">${isChapter ? "here" : "total"}</th>
+          <th class="num">${isChapter ? "cum." : "chs"}</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    `;
+    grid.appendChild(card);
+  }
+
+  section.append(grid, renderCombinations(combinations, scope, chapterIndex, labels));
+  return section;
+}
+
+// -- chapter lens (issue #14) -----------------------------------------------
+
+// `occ` is what is in this chapter, `cum` what the reader has met by the end of
+// it. Shown as a pair rather than one or the other because the repetition
+// question needs both: 3 occurrences of a word met 40 times already is a very
+// different chapter from 3 occurrences of a word met twice.
+const CHAPTER_COLUMNS = [
+  { label: "type", get: (r) => r.type },
+  { label: "lemma", get: (r) => r.lemma, cls: "greek" },
+  { label: "form", get: (r) => r.form, cls: "greek" },
+  { label: "parse", get: (r) => r.parse },
+  { label: "parse occ", get: (r) => r.parse_occ, type: "num", title: "occurrences of this lemma+parse in this chapter" },
+  { label: "parse cum", get: (r) => r.parse_cum, type: "num", title: "occurrences from the start of the text through this chapter" },
+  { label: "lemma occ", get: (r) => r.lemma_occ, type: "num", title: "occurrences of this lemma in this chapter, across all its parses" },
+  { label: "lemma cum", get: (r) => r.lemma_cum, type: "num", title: "occurrences from the start of the text through this chapter" },
+  { label: "1st lemma", get: (r) => r.first_occ_lemma, type: "bool", title: "this lemma appears for the first time in this chapter" },
+  { label: "1st parse", get: (r) => r.first_occ_parse, type: "bool", title: "this lemma+parse appears for the first time in this chapter" },
+  { label: "last lemma", get: (r) => r.last_occ_lemma, type: "bool", title: "this lemma never appears again after this chapter" },
+  { label: "last parse", get: (r) => r.last_occ_parse, type: "bool", title: "this lemma+parse never appears again after this chapter" },
+];
+
+// `inventory` is the corpus-wide combination table off the text report; this
+// chapter's counts are joined onto it. Null when a run has no text report, in
+// which case the chapter simply shows its dimension cards without them.
+function renderChapter(ch, root, inventory) {
   const { summary, rows } = ch;
   const details = document.createElement("details");
   details.className = "chapter-card";
@@ -26,104 +448,141 @@ function renderChapter(ch, root) {
   title.textContent = summary.title;
   const stats = document.createElement("span");
   stats.className = "chapter-stats";
-  stats.textContent = `unique lemmas: ${summary.unique_lemmas} · unique forms: ${summary.unique_forms}`;
+  stats.textContent =
+    `${summary.token_count.toLocaleString()} tokens · ` +
+    `unique lemmas: ${summary.unique_lemmas} · unique forms: ${summary.unique_forms}`;
   sum.append(title, stats);
 
-  const wrap = document.createElement("div");
-  wrap.className = "table-wrap";
-  const table = document.createElement("table");
-  const thead = document.createElement("thead");
-  thead.innerHTML = `
-    <tr>
-      <th class="row-num">#</th>
-      <th>type</th>
-      <th>lemma</th>
-      <th>form</th>
-      <th>parse</th>
-      <th>parse occ</th>
-      <th>lemma occ</th>
-      <th>1st lemma this chap</th>
-      <th>1st parse this chap</th>
-      <th>last lemma this chap</th>
-      <th>last parse this chap</th>
-    </tr>
-  `;
-  // make headers sortable
-  const ths = thead.querySelectorAll("th");
-  const sortIndicator = document.createElement("div");
-  sortIndicator.className = "sort-indicator muted";
-  sortIndicator.textContent = "";
-  ths.forEach((th, idx) => {
-    // The ordinal column always counts 1..N down the visible rows, so there is
-    // nothing in it to sort by — leave it out of the header wiring.
-    if (idx === ORDINAL_COL) return;
-    th.classList.add("sortable");
-    th.dataset.colIndex = String(idx);
-    th.addEventListener("click", () => {
-      const tableEl = table;
-      const currentlyAsc = th.classList.contains("sort-asc");
-      // clear other headers
-      ths.forEach((t) => t.classList.remove("sort-asc", "sort-desc"));
-      th.classList.add(currentlyAsc ? "sort-desc" : "sort-asc");
-      const asc = !currentlyAsc;
-      sortTable(tableEl, idx, asc);
-      sortIndicator.textContent = `Sorted by ${th.textContent} (${asc ? "asc" : "desc"})`;
-    });
-  });
-  const tbody = document.createElement("tbody");
-  for (const r of rows) {
-    const tr = document.createElement("tr");
-    tr.innerHTML = `
-      <td class="row-num"></td>
-      <td>${escapeHtml(r.type)}</td>
-      <td class="greek">${escapeHtml(r.lemma)}</td>
-      <td class="greek">${escapeHtml(r.form)}</td>
-      <td class="greek">${escapeHtml(r.parse)}</td>
-      <td>${r.parse_occ}</td>
-      <td>${r.lemma_occ}</td>
-      <td>${r.first_occ_lemma ? "yes" : ""}</td>
-      <td>${r.first_occ_parse ? "yes" : ""}</td>
-      <td>${r.last_occ_lemma ? "yes" : ""}</td>
-      <td>${r.last_occ_parse ? "yes" : ""}</td>
-    `;
-    tbody.appendChild(tr);
-  }
-  table.append(thead, tbody);
-  renumber(tbody);
-  
-  function getCellValue(row, i) {
-    const cell = row.children[i];
-    if (!cell) return "";
-    return cell.textContent.trim();
-  }
+  const body = document.createElement("div");
+  body.className = "chapter-body";
+  body.append(
+    renderGrammar(ch, "chapter", {
+      chapterIndex: summary.chapter_index,
+      combinations: chapterCombinations(inventory, ch.combination_counts),
+    }),
+    buildTable(CHAPTER_COLUMNS, rows)
+  );
 
-  const numericCols = new Set([5, 6]);
-  const booleanCols = new Set([7, 8, 9, 10]);
-
-  function sortTable(tbl, colIndex, asc = true) {
-    const tbody = tbl.tBodies[0];
-    const rows = Array.from(tbody.querySelectorAll("tr"));
-    rows.sort((a, b) => {
-      let va = getCellValue(a, colIndex);
-      let vb = getCellValue(b, colIndex);
-      if (numericCols.has(colIndex)) {
-        va = parseInt(va) || 0;
-        vb = parseInt(vb) || 0;
-        return asc ? va - vb : vb - va;
-      }
-      if (booleanCols.has(colIndex)) {
-        va = va.toLowerCase() === "yes" ? 1 : 0;
-        vb = vb.toLowerCase() === "yes" ? 1 : 0;
-        return asc ? va - vb : vb - va;
-      }
-      return asc ? va.localeCompare(vb, undefined, {sensitivity: "base"}) : vb.localeCompare(va, undefined, {sensitivity: "base"});
-    });
-    rows.forEach((r) => tbody.appendChild(r));
-    renumber(tbody);
-  }
-  wrap.append(sortIndicator, table);
-  details.append(sum, wrap);
+  details.append(sum, body);
   root.appendChild(details);
+}
+
+// -- text lens (issues #5 / #15) --------------------------------------------
+//
+// One table, one grain toggle, mirroring the lemma/parse toggle already specced
+// for this tab's chart. The two grains answer different questions — "how much of
+// this word is in the text" versus "how much of this word *in this form*" — and
+// a lemma with eight parses is eight rows in one view and one in the other.
+//
+// `chapter_count` is deliberately not derivable from first/last: a lemma in
+// chapters 1 and 20 spans twenty and appears in two, and that gap is the
+// repetition question.
+
+function chapterLabels(textReport) {
+  const byIndex = new Map();
+  for (const ch of textReport.chapters || []) byIndex.set(ch.chapter_index, ch);
+  return {
+    short: (i) => `${i + 1}`,
+    // Chapter indexes are 0-based corpus-wide; the label a human recognises is
+    // the title, so it rides along as a tooltip rather than widening the column.
+    long: (i) => {
+      const ch = byIndex.get(i);
+      return ch ? `${i + 1}. ${ch.title}${ch.filename ? ` (${ch.filename})` : ""}` : `${i + 1}`;
+    },
+  };
+}
+
+function textColumns(grain, labels) {
+  const cols = [
+    { label: "type", get: (r) => r.type },
+    { label: "lemma", get: (r) => r.lemma, cls: "greek" },
+  ];
+  if (grain === "parse") cols.push({ label: "parse", get: (r) => r.parse });
+  cols.push(
+    { label: "form", get: (r) => r.form, cls: "greek", title: "most frequent surface form — a representative, not a key" },
+    { label: "forms", get: (r) => r.form_count, type: "num", title: "distinct surface forms this row covers" },
+    { label: "total", get: (r) => r.total, type: "num", title: "occurrences across the whole text" },
+    {
+      label: "1st ch",
+      get: (r) => r.first_chapter,
+      type: "num",
+      text: (r) => labels.short(r.first_chapter),
+      cellTitle: (r) => labels.long(r.first_chapter),
+      title: "chapter it is introduced in",
+    },
+    {
+      label: "last ch",
+      get: (r) => r.last_chapter,
+      type: "num",
+      text: (r) => labels.short(r.last_chapter),
+      cellTitle: (r) => labels.long(r.last_chapter),
+      title: "chapter it last appears in",
+    },
+    { label: "# chs", get: (r) => r.chapter_count, type: "num", title: "distinct chapters it appears in — not last minus first" }
+  );
+  return cols;
+}
+
+function renderTextPanel(textReport) {
+  const panel = document.createElement("div");
+  panel.className = "tab-panel";
+
+  if (!textReport) {
+    panel.innerHTML = `<p class="muted">This report has no text-wide data. Re-run the analysis to build it.</p>`;
+    return panel;
+  }
+
+  const s = textReport.summary;
+  const head = document.createElement("p");
+  head.className = "text-summary";
+  head.textContent =
+    `${s.chapter_count} chapter${s.chapter_count === 1 ? "" : "s"} · ` +
+    `${s.token_count.toLocaleString()} tokens · ` +
+    `${s.unique_lemmas.toLocaleString()} lemmas · ` +
+    `${s.unique_parses.toLocaleString()} lemma+parse pairs · ` +
+    `${s.unique_forms.toLocaleString()} surface forms`;
+  panel.appendChild(head);
+
+  const labels = chapterLabels(textReport);
+
+  const grammar = document.createElement("details");
+  grammar.className = "grammar-details";
+  grammar.open = true;
+  const gsum = document.createElement("summary");
+  gsum.textContent = "Grammar profile — whole text";
+  grammar.append(
+    gsum,
+    renderGrammar(textReport, "text", { labels, combinations: textReport.form_combinations })
+  );
+  panel.appendChild(grammar);
+  const toolbar = document.createElement("div");
+  toolbar.className = "grain-toolbar";
+  toolbar.innerHTML = `
+    <span class="grain-label muted">Vocabulary by</span>
+    <span class="segmented" role="group" aria-label="Row grain">
+      <button type="button" class="btn-quiet" data-grain="lemma">lemma</button>
+      <button type="button" class="btn-quiet" data-grain="parse">lemma + parse</button>
+    </span>
+    <span class="grain-count muted"></span>
+  `;
+  const count = toolbar.querySelector(".grain-count");
+  const tableSlot = document.createElement("div");
+
+  function show(grain) {
+    const rows = grain === "parse" ? textReport.parse_rows : textReport.lemma_rows;
+    toolbar.querySelectorAll("[data-grain]").forEach((b) => {
+      b.classList.toggle("active", b.dataset.grain === grain);
+    });
+    count.textContent = `${rows.length.toLocaleString()} rows · sorted by total, click any header to re-sort`;
+    tableSlot.replaceChildren(buildTable(textColumns(grain, labels), rows));
+  }
+  toolbar.querySelectorAll("[data-grain]").forEach((b) => {
+    b.addEventListener("click", () => show(b.dataset.grain));
+  });
+
+  panel.append(toolbar, tableSlot);
+  show("lemma");
+  return panel;
 }
 
 // -- CSV export (issue #3) --------------------------------------------------
@@ -247,6 +706,55 @@ function downloadCsv(filename, text) {
   URL.revokeObjectURL(url);
 }
 
+function renderChaptersPanel(data) {
+  const panel = document.createElement("div");
+  panel.className = "tab-panel";
+
+  // The backend always returns a MultiFileReport: one section per file. File
+  // grouping stays inside this tab only — chapter indexes are corpus-wide and
+  // files are ordered before indexing, so every cumulative figure already spans
+  // the whole upload regardless of which file a chapter came from.
+  const inventory = data.text_report ? data.text_report.form_combinations : null;
+
+  for (const fileRep of data.file_reports) {
+    const fileDetails = document.createElement("details");
+    fileDetails.className = "file-section";
+    fileDetails.open = true;
+
+    const fileSummary = document.createElement("summary");
+    fileSummary.className = "file-title";
+    fileSummary.textContent = fileRep.filename;
+
+    const chapterContainer = document.createElement("div");
+    chapterContainer.className = "chapters-container";
+
+    for (const ch of fileRep.chapters) {
+      renderChapter(ch, chapterContainer, inventory);
+    }
+
+    fileDetails.append(fileSummary, chapterContainer);
+    panel.appendChild(fileDetails);
+  }
+  return panel;
+}
+
+function renderLemmaPanel() {
+  const panel = document.createElement("div");
+  panel.className = "tab-panel";
+  panel.innerHTML = `<p class="muted">Not built yet.</p>`;
+  return panel;
+}
+
+// Which lens is on screen. Module-level so switching between stored runs keeps
+// you in the tab you were reading rather than snapping back to Chapters.
+let activeTab = "chapters";
+
+const TABS = [
+  { key: "chapters", label: "Chapters", build: (data) => renderChaptersPanel(data) },
+  { key: "text", label: "Text", build: (data) => renderTextPanel(data.text_report) },
+  { key: "lemma", label: "Lemma", build: () => renderLemmaPanel() },
+];
+
 function renderReport(data, notice = null) {
   const root = $("report-root");
   root.classList.remove("hidden");
@@ -262,26 +770,42 @@ function renderReport(data, notice = null) {
     root.appendChild(banner);
   }
 
-  // The backend always returns a MultiFileReport: one section per file.
-  for (const fileRep of data.file_reports) {
-    const fileDetails = document.createElement("details");
-    fileDetails.className = "file-section";
-    fileDetails.open = true;
+  const bar = document.createElement("div");
+  bar.className = "tab-bar";
+  bar.setAttribute("role", "tablist");
 
-    const fileSummary = document.createElement("summary");
-    fileSummary.className = "file-title";
-    fileSummary.textContent = fileRep.filename;
+  const slot = document.createElement("div");
+  slot.className = "tab-slot";
 
-    const chapterContainer = document.createElement("div");
-    chapterContainer.className = "chapters-container";
+  // Panels are built on first view and cached. The text table can be a couple
+  // of thousand rows, and building all three up front would make opening a
+  // report pay for lenses the author may not look at.
+  const built = new Map();
 
-    for (const ch of fileRep.chapters) {
-      renderChapter(ch, chapterContainer);
-    }
-
-    fileDetails.append(fileSummary, chapterContainer);
-    root.appendChild(fileDetails);
+  function select(key) {
+    activeTab = key;
+    bar.querySelectorAll("[data-tab]").forEach((b) => {
+      const on = b.dataset.tab === key;
+      b.classList.toggle("active", on);
+      b.setAttribute("aria-selected", String(on));
+    });
+    if (!built.has(key)) built.set(key, TABS.find((t) => t.key === key).build(data));
+    slot.replaceChildren(built.get(key));
   }
+
+  for (const tab of TABS) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "tab";
+    btn.dataset.tab = tab.key;
+    btn.setAttribute("role", "tab");
+    btn.textContent = tab.label;
+    btn.addEventListener("click", () => select(tab.key));
+    bar.appendChild(btn);
+  }
+
+  root.append(bar, slot);
+  select(TABS.some((t) => t.key === activeTab) ? activeTab : "chapters");
 }
 
 // -- run history ------------------------------------------------------------

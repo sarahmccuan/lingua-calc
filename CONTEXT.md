@@ -113,6 +113,74 @@ Measured on the stored `Basil To the Rich` run (4,213 tokens): 100% of morpholog
 
 **Tests:** `pip install -e ".[dev]"` then `pytest`. `tests/conftest.py` has a `WordProvider` stand-in and an in-memory `.docx` builder, so the pipeline is testable without touching Bedrock.
 
+## Lenses (issues #14 / #15 / #16)
+
+The report is three tabs over one index, not three reports: **Chapters** (is *this* chapter right?), **Text** (is the whole progression right?), **Lemma** (where does *this word* live?). Only the first two are built; the third is a placeholder describing #16.
+
+Tabs are lazy — the text table can be a couple of thousand rows, and building every lens on open would make the author pay for ones they never look at. The selected tab is module-level state in `ui/app.js`, so loading a stored run keeps you in the lens you were reading.
+
+**File grouping lives inside the Chapters tab only.** Chapter indexes are corpus-wide and files are natural-sorted before indexing, so every cumulative figure already spans the whole upload; the text lens is one text even when the upload was several documents.
+
+### Chapter tab
+
+Two additions to the existing table, both straight off `Track`:
+
+- **`parse cum` / `lemma cum`** (issue #4) are `cumulative_through(chapter_index)`. Shown *beside* the per-chapter counts rather than instead of them, because the repetition question needs the pair: 3 occurrences of a word met 40 times already is a very different chapter from 3 occurrences of a word met twice.
+- **A grammatical form summary** (#14's "summary of the forms"), one card per feature dimension, plus a full form-combination table below them. "Forms" here means grammar — tense, mood, case — not surface spellings, which are already on `TokenRow.forms`.
+
+### The grammar profile, and why `FEATURE_VALUES` exists
+
+`CorpusIndex` cannot answer issue #7's question on its own. A value the corpus never contains is *absent* from the index, so iterating what it holds prints no future row at all — and "no row" reads as "I didn't check", not "no futures". `morphology.FEATURE_VALUES` supplies the expected vocabulary per dimension, in paradigm order rather than alphabetical, and `build_grammar_groups` zero-fills against it. **The zero rows are the feature.** They render dimmed but present; dropping them would make the question unaskable from the table.
+
+Three rules that go with it:
+
+- **A dimension the whole corpus never states is dropped**, tested corpus-wide rather than per chapter. Zero-filling inside a dimension is informative; an all-zero Degree card on a text with no comparatives is furniture — and a card set that changed as you paged between chapters would read as grammar appearing and vanishing.
+- **`GrammarGroup.stated` is not the sum of its rows.** `feature_any` deliberately files a syncretic `nom./acc.` under both readings, so the rows can add past the tokens involved. `stated` comes from `index.feature_dimension(dim)`, which counts each token once — the honest denominator to print a breakdown against.
+- **Coverage rides along with every profile.** `CoverageReport` is rendered next to the card grid, and turns red when labels need attention or the voice gap exceeds 5%. Without it an unparsed label is indistinguishable from grammar the text does not contain.
+
+`first_chapter == chapter_index` is what puts the **new** badge on a row: that is "grammar introduced here", the slope question in #7 read one chapter at a time.
+
+### Form combinations
+
+The per-dimension cards say "212 aorists". The combination table says *which* — `aor. act. ind. 3sg` as one row and `aor. mid. part. nom. sg. masc.` as another. A learner meets whole forms, not features, so two cells of the paradigm are two things to introduce even though both count as one aorist above. This is the granularity issue #7's opening quote actually asks for ("15 aorist participles").
+
+`morphology.signature()` renders a token's full feature set as a label; `CorpusIndex` tracks it as its own dimension. Two properties the per-dimension cards do not have:
+
+- **These rows partition.** Every token carries exactly one combination, so the column sums to the tokens carrying morphology — `tokens` is a real total, not a `stated`-style denominator. A syncretic form lands in one row that says so (`nom./acc.`) rather than being counted under both.
+- **They cannot be zero-filled against the language.** Greek's full cross product is thousands of cells almost none of which any text contains. So the row set is what the *corpus* attests: a chapter carries an explicit zero for a form the text uses elsewhere (the "no aorist participles here" reading), and forms the whole text lacks have no row at all. Those zero rows are behind a toggle that names its own count, because on a long text they outnumber the present ones several times over.
+
+**The inventory travels once, not per chapter.** Because the row set is corpus-wide, everything identifying a row — the label, its paradigm `order`, the chapters it spans — is *identical in every chapter*, and shipping the whole table per chapter duplicated it chapters × signatures times. `TextReport.form_combinations` carries the rows; `ChapterReport.combination_counts` carries only the two numbers that can differ (`occ`, `cumulative`), joined on `order` by `chapterCombinations()` in the UI, which re-derives the group and table totals by summing — these rows partition, so a class's tokens are exactly the sum of its `occ`. A row the text has not reached yet is omitted and defaults to (0, 0). On a 60-chapter / 25k-token corpus that took the section from 1.71 MB to 0.48 MB and the whole report from 10.5 MB to 9.3 MB. `build_form_combinations` still returns a fully scoped table and is what the chapter join is tested against.
+
+**One table per form class, not one list.** `morphology.classify_combination` sorts each combination into **Verbs** (finite forms and infinitives), **Participles**, **Nouns & adjectives** (any declined form — articles, pronouns and numerals included), or **Other**. A single ranked list interleaves paradigms that were never meant to be compared: "which tenses am I using" and "which cases am I using" are different questions, and a participle answers to neither, which is why it gets a table of its own rather than being filed under either. On `Basil To the Rich` that split is 92 verb forms / 84 participle forms / 50 nominal — the participles alone justify the separation.
+
+- **Classified from the decoded features, never from the provider's `type`.** The type is free text that drifts (the same word arrives as "verb", "participle", or nothing); the features say what the form is. Same reasoning as everything else in this layer.
+- **`"other"` is a real bucket, not a failure.** A bare `superl.` states neither a verbal feature nor a case and still has to land somewhere; dropping it would quietly shrink a total that is supposed to add up.
+- **A class the corpus never attests gets no table, decided corpus-wide.** A chapter with no participles keeps the table and says "None in this chapter" — losing it would leave the author to notice something missing.
+- **One toggle for all the tables.** "Should I see the forms this chapter lacks" is a single question; three checkboxes would make it look like three.
+
+Two rendering decisions:
+
+- **Signature order is citation order, not `FEATURE_DIMENSIONS` order.** Person and number fuse on a finite verb (`3sg`, not `sg. 3.`), and a participle states a case and declines instead. The result round-trips the provider's own spelling, so a row label matches the `parse` column beneath it rather than making the author translate between two notations. **Fusion contracts the atomic case only.** A syncretic person or number falls back to the spaced spelling a grammar prints — `3 sg./pl.`, `2/3 sg.` — because the contraction has nowhere to put the slash: interpolating the stored value wrote `3pl|sg`, leaking both the `|` encoding and its canonical sort order into a displayed label, and breaking the round-trip for exactly the ambiguous forms these rows exist to preserve. Person is the one dimension `feature_abbr` cannot render (it takes no period, so `person_abbr` handles it).
+- **Sorting the `form` column sorts by `order`, a paradigm rank**, not by the string. Alphabetical would file `aor.` before `impf.` before `pres.` and scatter the nominal forms through the verbal ones; paradigm order reads down a conjugation and then a declension. `order` is corpus position, so it survives a scope that reorders by count.
+
+Descriptors are deliberately *not* part of a combination: `def. art. gen. sg. fem.` and a noun's `gen. sg. fem.` are the same paradigm cell, and `type` is the column that tells an article from a noun. Measured inventory: 16 combinations across two LGPSI chapters, 41 across four, 226 on `Basil To the Rich` — bounded enough for one scrolling table with a sticky header.
+
+**`buildTable` returns three nested elements, not two.** The sort indicator sits outside the scrolling wrap: inside it, it scrolls sideways with a wide table, and where the wrap also scrolls vertically it pushes the sticky header down and lets rows paint in the gap above it.
+
+### Text tab
+
+One table with a lemma / lemma+parse toggle, mirroring the toggle already specced for this tab's chart. The two grains answer different questions — "how much of this word is in the text" versus "how much of it *in this form*" — and a lemma with eight parses is eight rows in one and one in the other. `TextRow` is one model for both (`parse` is empty on a lemma row) so the two cannot drift into disagreeing about what `total` means.
+
+- **`chapter_count` is deliberately not `last - first + 1`.** A lemma in chapters 1 and 20 spans twenty and appears in two, and that gap *is* the repetition question. Both are columns.
+- **Default order is total descending.** Every column sorts, so this is a default rather than a claim; sorting by `1st ch` descending is the "what's new in the latest chapter" reading and is one click away.
+- **`form` is a representative, not a key** — the most frequent surface form in the row's scope, with `forms` counting how many it stands for.
+
+**Charts are not built** — #15's stacked new-vs-repeated bars and the form treemap are still open. The rows behind them are all here.
+
+**Table sorting is now data-driven.** `buildTable` takes column descriptors carrying their own accessor and kind; the previous implementation read values back out of the DOM and kept numeric/boolean columns in hard-coded index sets, which mis-sorts silently the moment a column is inserted — and #4 inserts four.
+
+**Not done:** the CSV export (issue #3) still has its original columns; `lemma_cum`/`parse_cum` and the text-lens grain are not in it.
+
 ## Performance & throughput
 
 Bedrock output generation is the bottleneck — Greek expands to **~7-9 JSON tokens per input char** (each token object repeats Greek in both `lemma` and `form`, plus a `parse` label). A ~5000-char chapter needs ~40k output tokens.
