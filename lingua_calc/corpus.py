@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from typing import Iterable, Iterator
 
 from lingua_calc.models import TokenFact
-from lingua_calc.morphology import FEATURE_DIMENSIONS, MorphStatus, is_verb_form
+from lingua_calc.morphology import FEATURE_DIMENSIONS, MorphStatus, is_verb_form, signature
 
 
 class Track:
@@ -227,6 +227,17 @@ class CorpusIndex:
         # does not silently drop syncretic forms.
         self._features: dict[tuple[str, str], Track] = defaultdict(Track)
         self._features_incl: dict[tuple[str, str], Track] = defaultdict(Track)
+        # Tokens that stated a given dimension at all, regardless of value. This
+        # is the honest denominator for a grammar table: the per-value counts
+        # inside a dimension overlap (a syncretic form is counted under both its
+        # readings), so summing them can exceed the number of tokens involved.
+        self._dimensions: dict[str, Track] = defaultdict(Track)
+        # Whole feature combinations — the paradigm cell a token occupies, not
+        # its features counted separately in eight different places. Every token
+        # carrying morphology has exactly one, so unlike the per-dimension
+        # tracks these partition and can be summed.
+        self._signatures: dict[str, Track] = defaultdict(Track)
+        self._signature_features: dict[str, dict[str, str]] = {}
         self._morph_status: dict[str, Track] = defaultdict(Track)
         self._descriptors: dict[str, Track] = defaultdict(Track)
         # Numerator and denominator of the voice-gap figure, filled from the one
@@ -259,10 +270,16 @@ class CorpusIndex:
             self._types[fact.type].add(ci)
 
             morph = fact.morph
-            for dimension, value in morph.features().items():
+            features = morph.features()
+            for dimension, value in features.items():
                 self._features[(dimension, value)].add(ci)
+                self._dimensions[dimension].add(ci)
                 for alternative in value.split("|"):
                     self._features_incl[(dimension, alternative)].add(ci)
+            if features:
+                sig = signature(morph)
+                self._signatures[sig].add(ci)
+                self._signature_features.setdefault(sig, features)
             self._morph_status[morph.status.value].add(ci)
             for descriptor in morph.descriptors:
                 self._descriptors[descriptor].add(ci)
@@ -362,8 +379,36 @@ class CorpusIndex:
         for value in keys:
             yield value, self._features_incl[(dimension, value)]
 
+    def feature_dimension(self, dimension: str) -> Track:
+        """Tokens whose label stated ``dimension`` at all, whatever the value.
+
+        The denominator to print a per-value grammar breakdown against. Adding
+        the values up instead would overcount: ``feature_any`` deliberately files
+        a syncretic ``nom./acc.`` under both readings, so a case profile can sum
+        past the number of tokens that actually carry a case.
+        """
+        return self._dimensions.get(dimension, _EMPTY_TRACK)
+
     def iter_feature_dimensions(self) -> Iterator[str]:
         return iter(FEATURE_DIMENSIONS)
+
+    def signature(self, sig: str) -> Track:
+        """One whole feature combination, e.g. ``"aor. act. part. nom. sg. masc."``."""
+        return self._signatures.get(sig, _EMPTY_TRACK)
+
+    def iter_signatures(self) -> Iterator[tuple[str, dict[str, str], Track]]:
+        """Every combination attested anywhere in the corpus, with its features.
+
+        Unordered — the paradigm ordering lives in ``morphology`` and is applied
+        by whoever builds the table, because it is a display concern.
+
+        Note this yields what the corpus *has*, not what Greek permits: the full
+        cross product runs to thousands of cells that no text contains, so this
+        dimension cannot be zero-filled the way a single feature can. A chapter
+        table zero-fills against these attested rows instead.
+        """
+        for sig, track in self._signatures.items():
+            yield sig, self._signature_features[sig], track
 
     def deponents(self) -> Track:
         """Tokens labelled deponent — middle in form, active in meaning.
@@ -439,6 +484,16 @@ class CorpusIndex:
         for key in sorted(self._types):
             yield key, self._types[key]
 
+    def iter_facts(self) -> Iterator[TokenFact]:
+        """Every token in the corpus, in reading order.
+
+        The escape hatch for statistics that need something off the fact itself
+        rather than off a count — the corpus-wide table in issue #5 uses it to
+        pick each lemma's representative surface form and part of speech.
+        """
+        for chapter_index in self.chapter_indexes:
+            yield from self._by_chapter[chapter_index]
+
     # -- corpus totals --------------------------------------------------
 
     @property
@@ -452,3 +507,8 @@ class CorpusIndex:
     @property
     def unique_forms(self) -> int:
         return len(self._forms)
+
+    @property
+    def unique_parses(self) -> int:
+        """Distinct (lemma, parse) pairs — the row count of the text-wide table."""
+        return len(self._parses)

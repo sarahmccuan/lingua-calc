@@ -163,9 +163,14 @@ button:disabled {
   color: var(--muted);
 }
 
+/* The sort indicator and the scrolling table. The wrap holds only the table so
+   a sticky header inside it has nothing above it to paint through. */
+.table-block {
+  border-top: 1px solid var(--border);
+}
+
 .table-wrap {
   overflow-x: auto;
-  border-top: 1px solid var(--border);
 }
 
 table {
@@ -212,6 +217,10 @@ tbody tr:hover {
 th.sortable {
   cursor: pointer;
   position: relative;
+  /* Room for the sort arrow, which is absolutely positioned at the right edge.
+     Without it the arrow sits on top of the label in any column narrow enough
+     to matter — which, now that the counts are right-aligned, is most of them. */
+  padding-right: 1.5rem;
 }
 
 th.sortable::after {
@@ -244,6 +253,11 @@ th.sortable.sort-desc::after {
   font-size: 0.8125rem;
   color: var(--muted);
   font-style: italic;
+  /* Reserved even while empty. It only gains text on the first sort, and
+     letting it appear then would shift the header row out from under the
+     pointer — so the second click of a click-twice-to-reverse lands on the
+     wrong column. */
+  min-height: 1.9rem;
 }
 
 .greek {
@@ -427,4 +441,616 @@ th.sortable.sort-desc::after {
 .report-notice {
   margin: 0 0 0.75rem;
   font-size: 0.8125rem;
+}
+
+/* -- lenses (issue #7) -----------------------------------------------------
+   Three tabs, three grains: a chapter at a time, the whole text at once, and
+   one lemma across the text. They are peers, not a hierarchy, so the bar is
+   flat and underlined rather than nested inside the report. */
+
+.tab-bar {
+  display: flex;
+  gap: 0.25rem;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 1.25rem;
+}
+
+.tab {
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  padding: 0.5rem 0.9rem;
+  color: var(--muted);
+  font-weight: 500;
+  margin-bottom: -1px;
+}
+
+.tab:hover {
+  color: var(--fg);
+}
+
+.tab.active {
+  color: var(--fg);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+
+/* -- grammatical form summary (issues #7 / #14) ---------------------------
+   One card per dimension. A dimension is the unit the question is asked in
+   ("how many aorists", "how many datives"), so a single ranked list would
+   interleave answers that were never meant to be compared. */
+
+.chapter-body {
+  border-top: 1px solid var(--border);
+}
+
+.grammar {
+  padding: 0.75rem 1rem 1rem;
+}
+
+.grammar-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem 1rem;
+  margin-bottom: 0.6rem;
+}
+
+.grammar-head h3 {
+  margin: 0;
+  font-size: 0.9375rem;
+  font-weight: 600;
+}
+
+/* Error bars for the counts beside it. Only raised out of muted when there is
+   something to raise it for — a clean run should read as unremarkable. */
+.coverage-note {
+  margin: 0;
+  font-size: 0.8125rem;
+}
+
+.coverage-note.warn {
+  color: var(--error);
+}
+
+.grammar-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 0.75rem;
+}
+
+.grammar-card {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.grammar-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.5rem;
+  padding: 0.35rem 0.5rem;
+  background: var(--header-bg);
+  font-size: 0.8125rem;
+}
+
+.grammar-dimension {
+  font-weight: 600;
+}
+
+.grammar-card-head .muted {
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The report table sets a 1080px floor for its dozen columns; these have three
+   and must size to their card. */
+.grammar-table {
+  min-width: 0;
+  font-size: 0.8125rem;
+}
+
+.grammar-table th,
+.grammar-table td {
+  padding: 0.2rem 0.5rem;
+}
+
+.grammar-table th {
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--muted);
+  background: transparent;
+}
+
+/* A zero row is the answer to "are there any futures here", so it stays on
+   screen — dimmed, because the rows that carry a count are the ones being
+   read. Removing it would make the question unanswerable from the table. */
+.grammar-table tr.zero td,
+.combinations tbody tr.zero td {
+  color: var(--muted);
+  opacity: 0.55;
+}
+
+.badge-new {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  color: var(--accent);
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  padding: 0 0.25rem;
+  vertical-align: 1px;
+}
+
+/* -- form combinations ----------------------------------------------------
+   The paradigm-cell view that sits under the per-dimension cards. Narrower
+   than the report table by a long way, so it opts out of the 1080px floor. */
+
+.combinations {
+  margin-top: 1rem;
+}
+
+.combinations-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.4rem 0.9rem;
+  font-size: 0.8125rem;
+}
+
+.combinations-head h4 {
+  margin: 0;
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+/* Pushed right so the control that changes what the table contains is not
+   mistaken for part of the count beside the heading. */
+.combinations-toggle {
+  margin-left: auto;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.combinations-toggle input {
+  cursor: pointer;
+  margin: 0;
+}
+
+/* Two across on a wide panel, stacking below that. The floor is set by the
+   longest label these tables hold — a participle states six features
+   ("aor. mid. part. nom. sg. masc.") and must not wrap. */
+.combinations-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(26rem, 1fr));
+  gap: 0.9rem;
+  margin-top: 0.5rem;
+}
+
+.combinations-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.5rem;
+  font-size: 0.8125rem;
+  padding-bottom: 0.2rem;
+}
+
+.combinations-class {
+  font-weight: 600;
+}
+
+.combinations-class[title] {
+  cursor: help;
+  text-decoration: underline dotted var(--border);
+  text-underline-offset: 3px;
+}
+
+.combinations-card-head .muted {
+  font-variant-numeric: tabular-nums;
+}
+
+.combinations-empty {
+  margin: 0;
+  padding: 0.4rem 0.5rem;
+  font-size: 0.8125rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.combinations .table-block {
+  border: 0;
+}
+
+.combinations .table-wrap {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  max-height: 26rem;
+  overflow-y: auto;
+}
+
+/* The indicator is empty until the first sort and this table already announces
+   its order in the heading above, so it does not reserve a line here. */
+.combinations .sort-indicator {
+  min-height: 0;
+  padding: 0.2rem 0 0.15rem;
+}
+
+/* A long text attests a few hundred combinations, so the header has to survive
+   scrolling or the counts lose their column names halfway down. */
+.combinations thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.table-narrow {
+  min-width: 0;
+}
+
+.grammar-details {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 1.25rem;
+}
+
+.grammar-details > summary {
+  cursor: pointer;
+  padding: 0.6rem 1rem;
+  font-weight: 600;
+  font-size: 0.9375rem;
+}
+
+.grammar-details .grammar {
+  border-top: 1px solid var(--border);
+}
+
+/* -- charts (issue #15) ---------------------------------------------------
+   Four fills, used by both charts: new / already-met on the bars, and the
+   first three form classes plus a neutral on the treemap. They are a
+   *validated* set rather than four colours that looked distinct — checked for
+   lightness band, chroma, WCAG contrast against these two surfaces, and
+   separation under simulated protanopia and deuteranopia, all pairs (worst
+   pair 9.2 ΔE light / 9.4 dark against a floor of 8; worst unsimulated pair
+   24.0 / 20.9 against a floor of 15). Re-run that check before changing a
+   value; "these look different" is not the same test.
+
+   Slot 4 is grey by design. It is the treemap's "Other" bucket, and a fourth
+   saturated hue would have to sit beside the orange at a separation full-colour
+   readers cannot rely on.
+
+   `--series-N-ink` is the label colour for text sitting *on* that fill — white
+   or near-black, whichever clears contrast on it. Text anywhere else on a chart
+   wears the page's own ink, never the series colour. */
+:root {
+  --series-1: #2a78d6;
+  --series-1-ink: #ffffff;
+  --series-2: #eb6834;
+  --series-2-ink: #111111;
+  --series-3: #1baf7a;
+  --series-3-ink: #111111;
+  --series-4: #71717a;
+  --series-4-ink: #ffffff;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    /* The same four hues stepped for the dark surface, not an automatic flip:
+       the light steps sit below 3:1 on #18181b. */
+    --series-1: #3987e5;
+    --series-1-ink: #111111;
+    --series-2: #d95926;
+    --series-2-ink: #111111;
+    --series-3: #199e70;
+    --series-3-ink: #111111;
+    --series-4: #a1a1aa;
+    --series-4-ink: #111111;
+  }
+}
+
+.series-1 {
+  fill: var(--series-1);
+}
+
+.series-2 {
+  fill: var(--series-2);
+}
+
+.series-3 {
+  fill: var(--series-3);
+}
+
+.series-4 {
+  fill: var(--series-4);
+}
+
+.ink-1 {
+  fill: var(--series-1-ink);
+}
+
+.ink-2 {
+  fill: var(--series-2-ink);
+}
+
+.ink-3 {
+  fill: var(--series-3-ink);
+}
+
+.ink-4 {
+  fill: var(--series-4-ink);
+}
+
+.chart-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  margin-bottom: 1.25rem;
+}
+
+.chart-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.75rem 1rem 0.9rem;
+}
+
+.chart-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.35rem 1rem;
+}
+
+.chart-head h4 {
+  margin: 0;
+  font-size: 0.9375rem;
+  font-weight: 600;
+}
+
+.chart-sub {
+  margin: 0;
+  font-size: 0.8125rem;
+  /* Takes the rest of the first line so the legend and controls wrap to their
+     own row rather than being squeezed against the title. */
+  flex: 1 1 18rem;
+}
+
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.9rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.8125rem;
+}
+
+.chart-legend li {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.35rem;
+}
+
+.chart-swatch {
+  display: inline-block;
+  width: 0.65rem;
+  height: 0.65rem;
+  border-radius: 2px;
+  /* The swatch is the only place a chart colour appears in a line of text, and
+     it is a mark beside the label rather than the label itself. */
+  background: currentColor;
+  color: var(--series-1);
+}
+
+.chart-swatch.series-1 {
+  color: var(--series-1);
+}
+
+.chart-swatch.series-2 {
+  color: var(--series-2);
+}
+
+.chart-swatch.series-3 {
+  color: var(--series-3);
+}
+
+.chart-swatch.series-4 {
+  color: var(--series-4);
+}
+
+.chart-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-left: auto;
+}
+
+.chart-view {
+  padding: 0.2rem 0.7rem;
+  font-size: 0.8125rem;
+}
+
+.chart-body {
+  margin-top: 0.6rem;
+}
+
+.chart-plot {
+  position: relative;
+}
+
+/* A wide corpus makes a wide chart. Sixty chapters is 2000px of columns, and
+   squeezing them into the panel would put the bars below a pixel — so the plot
+   scrolls sideways, the same as the wide tables on this page. */
+.chart-scroll {
+  overflow-x: auto;
+}
+
+.chart-svg {
+  display: block;
+}
+
+.chart-grid {
+  stroke: var(--border);
+  stroke-width: 1;
+  /* Solid, not dashed: a dashed grid reads as a threshold or a projection when
+     it is only a ruler. */
+}
+
+.chart-axis-line {
+  stroke: var(--border);
+  stroke-width: 1;
+}
+
+.chart-axis {
+  fill: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.chart-block-label {
+  fill: var(--fg);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.chart-cell-label {
+  font-size: 11px;
+  pointer-events: none;
+}
+
+.chart-cell-count {
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.8;
+  pointer-events: none;
+}
+
+.chart-cell {
+  cursor: default;
+}
+
+.chart-cell:hover,
+.chart-cell:focus-visible {
+  /* The hover cue is a lift in the mark itself; an outline would add a stroke
+     around a cell whose neighbours are 2px away and read as a border. */
+  opacity: 0.75;
+  outline: none;
+}
+
+/* One target per column, the full height of the plot and the full width of the
+   slot — so a 4px-tall bar is still hoverable, and the target clears 24px. */
+.chart-hit {
+  fill: transparent;
+  cursor: default;
+}
+
+.chart-hit:hover,
+.chart-hit:focus-visible {
+  fill: var(--row-hover);
+  outline: none;
+}
+
+.chart-tip {
+  position: absolute;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 9rem;
+  max-width: 20rem;
+  padding: 0.4rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--header-bg);
+  color: var(--fg);
+  font-size: 0.75rem;
+  line-height: 1.45;
+  pointer-events: none;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+}
+
+/* `display: flex` above out-ranks the user agent's `[hidden] { display: none }`,
+   which parks the readout in the corner of every chart until first hover. */
+.chart-tip[hidden] {
+  display: none;
+}
+
+.chart-tip strong {
+  font-weight: 600;
+}
+
+/* Direct children only: a swatch or a muted aside inside one of these lines is
+   part of the line, not a line of its own. */
+.chart-tip > span {
+  display: block;
+}
+
+.chart-tip .chart-swatch {
+  margin-right: 0.3rem;
+}
+
+.chart-note {
+  margin: 0.6rem 0 0;
+  font-size: 0.8125rem;
+}
+
+/* -- text lens (issues #5 / #15) ------------------------------------------ */
+
+.text-summary {
+  margin: 0 0 1rem;
+  font-size: 0.875rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.grain-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+  margin-bottom: 0.5rem;
+  font-size: 0.8125rem;
+}
+
+.segmented button {
+  padding: 0.2rem 0.7rem;
+  font-size: 0.8125rem;
+  border-radius: 0;
+}
+
+.segmented button:first-child {
+  border-radius: 5px 0 0 5px;
+}
+
+.segmented button:last-child {
+  border-radius: 0 5px 5px 0;
+  margin-left: -1px;
+}
+
+.segmented button.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--row-hover);
+  z-index: 1;
+  position: relative;
+}
+
+.grain-count {
+  margin-left: auto;
+}
+
+/* Counts belong in a column the eye can scan down, which means right-aligned
+   with tabular figures — the same treatment the ordinal already gets. */
+td.num,
+th.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.file-title {
+  cursor: pointer;
+  font-weight: 600;
+  padding: 0.4rem 0;
 }

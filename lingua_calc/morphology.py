@@ -43,6 +43,242 @@ FEATURE_DIMENSIONS: tuple[str, ...] = (
     "degree",
 )
 
+# The canonical value of each dimension, in the order a grammar table should
+# read it — paradigm order, not alphabetical. This exists for the half of issue
+# #7 that ``CorpusIndex`` cannot answer on its own: a value the corpus never
+# contains is *absent* from the index, so "0 future tenses in this chapter" is
+# indistinguishable from "future was never asked about" unless the expected
+# vocabulary is supplied from outside. This tuple is that vocabulary.
+#
+# Atomic values only. Syncretism is stored as a compound ("acc|nom") and
+# ``feature_any`` files it under each side, so the compound never needs a row of
+# its own.
+FEATURE_VALUES: dict[str, tuple[str, ...]] = {
+    "tense": ("pres", "impf", "fut", "aor", "perf", "plup"),
+    "voice": ("act", "mid", "pass"),
+    "mood": ("ind", "subj", "opt", "imp", "inf", "part"),
+    "case": ("nom", "gen", "dat", "acc", "voc"),
+    "number": ("sg", "dual", "pl"),
+    "gender": ("masc", "fem", "neut"),
+    "person": ("1", "2", "3"),
+    "degree": ("comp", "superl"),
+}
+
+# Display names. Kept beside the values rather than in the UI so a table, a CSV
+# column and a log line all spell a feature the same way.
+DIMENSION_LABELS: dict[str, str] = {
+    "tense": "Tense",
+    "voice": "Voice",
+    "mood": "Mood",
+    "case": "Case",
+    "number": "Number",
+    "gender": "Gender",
+    "person": "Person",
+    "degree": "Degree",
+}
+
+FEATURE_LABELS: dict[tuple[str, str], str] = {
+    ("tense", "pres"): "present",
+    ("tense", "impf"): "imperfect",
+    ("tense", "fut"): "future",
+    ("tense", "aor"): "aorist",
+    ("tense", "perf"): "perfect",
+    ("tense", "plup"): "pluperfect",
+    ("voice", "act"): "active",
+    ("voice", "mid"): "middle",
+    ("voice", "pass"): "passive",
+    ("mood", "ind"): "indicative",
+    ("mood", "subj"): "subjunctive",
+    ("mood", "opt"): "optative",
+    ("mood", "imp"): "imperative",
+    ("mood", "inf"): "infinitive",
+    ("mood", "part"): "participle",
+    ("case", "nom"): "nominative",
+    ("case", "gen"): "genitive",
+    ("case", "dat"): "dative",
+    ("case", "acc"): "accusative",
+    ("case", "voc"): "vocative",
+    ("number", "sg"): "singular",
+    ("number", "dual"): "dual",
+    ("number", "pl"): "plural",
+    ("gender", "masc"): "masculine",
+    ("gender", "fem"): "feminine",
+    ("gender", "neut"): "neuter",
+    ("person", "1"): "1st",
+    ("person", "2"): "2nd",
+    ("person", "3"): "3rd",
+    ("degree", "comp"): "comparative",
+    ("degree", "superl"): "superlative",
+}
+
+
+def feature_label(dimension: str, value: str) -> str:
+    """Human name for a decoded feature value.
+
+    Compound values are spelled with a slash the way the source label was
+    ("acc|nom" reads back as "accusative/nominative"), so an ambiguous form is
+    never displayed as if it had been resolved.
+    """
+    return "/".join(
+        FEATURE_LABELS.get((dimension, part), part) for part in value.split("|")
+    )
+
+
+def _paradigm_rank(dimension: str, value: str) -> int:
+    """Position of ``value`` in its dimension's paradigm order.
+
+    Unknown values sort last rather than raising — the normalizer is
+    deliberately tolerant, and a value it learns to decode before this table
+    learns to order it should still appear.
+    """
+    order = FEATURE_VALUES.get(dimension, ())
+    ranks = [order.index(part) for part in value.split("|") if part in order]
+    return min(ranks) if ranks else len(order)
+
+
+def feature_abbr(dimension: str, value: str) -> str:
+    """The value as a grammar writes it: ``"acc|nom"`` → ``"nom./acc."``.
+
+    Ambiguity keeps both readings, ordered by the paradigm rather than however
+    the sort in ``parse_morphology`` happened to leave them, so the display
+    never implies the syncretism was resolved.
+    """
+    parts = sorted(value.split("|"), key=lambda part: _paradigm_rank(dimension, part))
+    # Period on every reading, not just the last: the provider writes "nom./acc."
+    # and "masc./fem./neut.", and a combination table that spelled them
+    # "nom/acc." would not match the labels in the row beneath it.
+    return "/".join(f"{part}." for part in parts)
+
+
+def person_abbr(value: str) -> str:
+    """Person as a grammar writes it, keeping ambiguity: ``"2|3"`` → ``"2/3"``.
+
+    The one dimension ``feature_abbr`` cannot render, because person is written
+    as a bare numeral — "3sg", "2/3 sg." — and a period would spell it "3.".
+    Everything else it does is still needed: paradigm order rather than the sort
+    ``parse_morphology`` happened to leave, and a slash rather than the ``|``
+    the value is stored under.
+    """
+    parts = sorted(value.split("|"), key=lambda part: _paradigm_rank("person", part))
+    return "/".join(parts)
+
+
+# --- form combinations -----------------------------------------------------
+#
+# The per-dimension counts answer "how many aorists"; these answer "which forms
+# are actually in play" — the whole cell of the paradigm, "aor. act. part. nom.
+# sg. masc." rather than an aorist, a participle and a nominative counted
+# separately in three different places.
+#
+# Unlike the per-dimension counts these **partition**: every token has exactly
+# one signature, so a column of them sums to the number of tokens carrying
+# morphology. Nothing is double-counted, because a syncretic form lands in one
+# row that says so ("nom./acc.") instead of in both rows it could belong to.
+
+
+def signature(morph: Morphology) -> str:
+    """Render one token's full feature combination in citation order.
+
+    Not ``FEATURE_DIMENSIONS`` order joined with spaces: person and number fuse
+    on a finite verb ("3sg", not "sg. 3."), and once they do, person belongs
+    where the fusion puts it. Everything else follows the order a grammar
+    prints — tense, voice, mood, then case, number, gender, degree.
+
+    Returns ``""`` for a label carrying no morphology, which is the signal to
+    leave that token out of the table rather than give it an empty row.
+    """
+    feats = morph.features()
+    if not feats:
+        return ""
+
+    parts = [feature_abbr(dim, feats[dim]) for dim in ("tense", "voice", "mood") if dim in feats]
+    if "case" in feats:
+        parts.append(feature_abbr("case", feats["case"]))
+
+    person, number = feats.get("person"), feats.get("number")
+    # A finite verb fuses them; a participle states a case and declines, so its
+    # number stays separate and it has no person to fuse with anyway.
+    if person and number and "case" not in feats:
+        # Fusion is a typographic contraction of the *atomic* case, and only
+        # that case: "3sg". A syncretic reading cannot contract — writing the
+        # stored value straight through spelled it "3pl|sg", leaking both the
+        # `|` encoding and the canonical sort order into a displayed label, and
+        # "3sg./pl." would read as one form rather than the two it stands for.
+        # So an ambiguous person or number falls back to the spaced spelling a
+        # grammar prints: "3 sg./pl.", "2/3 sg.".
+        if "|" in person or "|" in number:
+            parts.append(f"{person_abbr(person)} {feature_abbr('number', number)}")
+        else:
+            parts.append(f"{person}{number}")
+    else:
+        if number:
+            parts.append(feature_abbr("number", number))
+        if person:
+            parts.append(person_abbr(person))
+
+    for dim in ("gender", "degree"):
+        if dim in feats:
+            parts.append(feature_abbr(dim, feats[dim]))
+    return " ".join(parts)
+
+
+# Which table a combination belongs in, in display order. Participles get their
+# own because they are the hybrid: verbal in tense and voice, declined in case
+# and gender, so they read as noise in either of the other two tables and as a
+# paradigm in their own.
+FORM_CLASSES: tuple[tuple[str, str], ...] = (
+    ("verb", "Verbs"),
+    ("participle", "Participles"),
+    ("nominal", "Nouns & adjectives"),
+    ("other", "Other"),
+)
+
+FORM_CLASS_HINTS: dict[str, str] = {
+    "verb": "finite forms and infinitives",
+    "participle": "verbal in tense and voice, declined in case and gender",
+    "nominal": "any declined form — nouns, adjectives, articles, pronouns, numerals",
+    "other": "combinations that state neither a verbal feature nor a case",
+}
+
+
+def classify_combination(features: dict[str, str]) -> str:
+    """Sort one feature combination into a table.
+
+    Classified from the decoded features, never from the provider's ``type``:
+    the type is free text that drifts (the same word arrives as "verb",
+    "participle" or nothing at all), which is the whole reason this module
+    exists. The features say what the form *is*.
+
+    ``"other"`` is a real bucket, not a failure — a bare ``superl.`` states
+    neither a verbal feature nor a case and still has to land somewhere, and
+    dropping it would quietly shrink a total that is supposed to add up.
+    """
+    if "part" in (features.get("mood") or "").split("|"):
+        return "participle"
+    if features.keys() & {"tense", "voice", "mood"}:
+        return "verb"
+    if "case" in features:
+        return "nominal"
+    return "other"
+
+
+def signature_sort_key(features: dict[str, str]) -> tuple:
+    """Order combinations by paradigm rather than alphabetically.
+
+    Sorting the rendered strings would file "aor." before "impf." before
+    "pres." and scatter the nominal forms through the verbal ones. This walks
+    the dimensions in citation order, ranking each value within its own
+    paradigm, so the table reads down a conjugation and then a declension.
+
+    A dimension the combination does not state sorts after one that does, which
+    is what keeps verb forms together and nominal forms together instead of
+    interleaving them.
+    """
+    return tuple(
+        (0, _paradigm_rank(dim, features[dim])) if dim in features else (1, -1)
+        for dim in FEATURE_DIMENSIONS
+    )
+
 
 class MorphStatus(str, Enum):
     """How much of a parse label the normalizer understood.

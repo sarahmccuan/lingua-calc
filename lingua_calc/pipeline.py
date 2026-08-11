@@ -13,7 +13,7 @@ from lingua_calc.docx_extract import TextChapter, extract_chapters_from_docx
 from lingua_calc.models import DocumentReport, FileReport, MultiFileReport, ParsedToken, TokenFact
 from lingua_calc.nlp.base import LemmatizeParseProvider
 from lingua_calc.nlp.bedrock import BedrockClaudeProvider
-from lingua_calc.stats import build_chapter_report
+from lingua_calc.stats import build_chapter_report, build_text_report
 from lingua_calc.store import TokenStore, save_run_safely
 
 logger = logging.getLogger(__name__)
@@ -212,7 +212,11 @@ def analyze_docx_files(
         filenames=[name for name, _ in ordered_files],
     )
 
-    return MultiFileReport(file_reports=build_file_reports(index), run_id=run_id)
+    return MultiFileReport(
+        file_reports=build_file_reports(index),
+        text_report=build_text_report(index),
+        run_id=run_id,
+    )
 
 
 def analyze_docx_bytes(
@@ -243,4 +247,8 @@ def reports_from_run(
     if store is None or store.get_run(run_id) is None:
         return None
     index = store.load_index(run_id)
-    return MultiFileReport(file_reports=build_file_reports(index), run_id=run_id)
+    return MultiFileReport(
+        file_reports=build_file_reports(index),
+        text_report=build_text_report(index),
+        run_id=run_id,
+    )
