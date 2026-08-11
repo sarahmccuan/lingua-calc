@@ -169,13 +169,33 @@ Descriptors are deliberately *not* part of a combination: `def. art. gen. sg. fe
 
 ### Text tab
 
-One table with a lemma / lemma+parse toggle, mirroring the toggle already specced for this tab's chart. The two grains answer different questions — "how much of this word is in the text" versus "how much of it *in this form*" — and a lemma with eight parses is eight rows in one and one in the other. `TextRow` is one model for both (`parse` is empty on a lemma row) so the two cannot drift into disagreeing about what `total` means.
+One table with a lemma / lemma+parse toggle, the same toggle the chart above it carries. The two grains answer different questions — "how much of this word is in the text" versus "how much of it *in this form*" — and a lemma with eight parses is eight rows in one and one in the other. `TextRow` is one model for both (`parse` is empty on a lemma row) so the two cannot drift into disagreeing about what `total` means.
 
 - **`chapter_count` is deliberately not `last - first + 1`.** A lemma in chapters 1 and 20 spans twenty and appears in two, and that gap *is* the repetition question. Both are columns.
 - **Default order is total descending.** Every column sorts, so this is a default rather than a claim; sorting by `1st ch` descending is the "what's new in the latest chapter" reading and is one click away.
 - **`form` is a representative, not a key** — the most frequent surface form in the row's scope, with `forms` counting how many it stands for.
 
-**Charts are not built** — #15's stacked new-vs-repeated bars and the form treemap are still open. The rows behind them are all here.
+### The two charts (issue #15)
+
+Both are hand-rolled SVG in `ui/app.js`. The package is dependency-free and two charts do not pay for a bundle, a build step and a second theming system; a library would have supplied a legend and an axis, which are twenty lines each.
+
+**New vs. repeated vocabulary** — stacked columns per chapter, with the same lemma / lemma+parse toggle as the table. "New" is the chapter a key's `first_chapter` falls in, the same test as the `1st lemma` / `1st parse` badges on the chapter table, so the bars are that column added up. `TextReport.lemma_progress` / `parse_progress` carry it (`stats.build_progression`); the split partitions the chapter at either grain, which is what the test asserts.
+
+- **The bars stack types, not tokens.** The question is vocabulary load — how many words a chapter asks the reader to learn. Tokens answer a different one (how much of the running text those words account for) and are on every point, in the tooltip and the table view; only the bar height had to choose.
+- **Already-met sits at the baseline, new stacks on top** — the vocabulary the chapter can assume is the base it builds on, the new words are what it adds. The cost is that `new` no longer starts from a common baseline, so comparing it across chapters is comparing segment lengths rather than reading off the gridlines; the tooltip and the table view carry the exact counts for that reading.
+- **A one-chapter run gets a sentence, not a chart.** Everything in the first chapter is new by definition; a single bar with axes drawn around it says nothing that the sentence does not.
+- **Chapters divide the panel until they would be narrower than a hover target** (34px), and past that the plot scrolls sideways like the wide tables. A four-chapter text should not be a thumbnail in the corner of the card; a sixty-chapter one cannot be squeezed into it.
+
+**The form treemap** — area is occurrences, one block per form class, one cell per paradigm cell. This is the chart that could only be drawn from `form_combinations`: those rows **partition**, so dividing a rectangle up is an honest picture of them. The per-dimension cards cannot be drawn this way — `feature_any` files a syncretic `nom./acc.` under both readings, and area would double-count it. Layout is squarified (Bruls, Huizing & van Wijk 2000); slice-and-dice turns 226 cells into unhoverable slivers.
+
+Rules shared by both, each of which had a visible failure behind it:
+
+- **Marks carry colour; text never does.** Labels, values and legends stay in the page's ink. The exception is a label set *inside* a fill, which takes `--series-N-ink` — white or near-black, whichever clears contrast on that fill.
+- **Every label is measured before it is drawn** — cell labels against their cell, and a block's token count against the block. A clipped label crops exactly the features that identify a form, and an unmeasured block count printed itself across the *next* block's name, which reads as one label wearing the wrong colour.
+- **A 2px gap in the surface separates touching marks**, never a stroke around them: at these sizes a border thickens a small cell by a third, and it is ink that is not data. The gap comes off the upper stacked segment, so the lower one keeps its baseline and the stack keeps its top edge.
+- **Nothing is readable only by hovering.** The bars have a table view (which is also where the token figures live), the treemap has the form tables directly below it, and both readouts are on focus as well as hover.
+- **The four fills are a validated set, not four colours that looked distinct** — checked for lightness band, chroma, contrast against *these* two surfaces, and separation under simulated protanopia and deuteranopia across all pairs (worst 9.2 ΔE light / 9.4 dark against a floor of 8; worst unsimulated 24.0 / 20.9 against a floor of 15). Slot 4 is a neutral grey because it is the treemap's "Other" bucket, and a fourth saturated hue would have to sit beside the orange at a separation full-colour readers cannot rely on. Re-run the check before changing a value.
+- **Charts are laid out in pixels and drawn twice**: once at a default width, then again when a `ResizeObserver` tells the card how wide it actually is. A scaled `viewBox` would have been less code and would also have scaled an 11px label to whatever the panel felt like.
 
 **Table sorting is now data-driven.** `buildTable` takes column descriptors carrying their own accessor and kind; the previous implementation read values back out of the DOM and kept numeric/boolean columns in hard-coded index sets, which mis-sorts silently the moment a column is inserted — and #4 inserts four.
 

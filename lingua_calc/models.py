@@ -323,6 +323,33 @@ class TextRow(BaseModel):
     chapter_count: int = Field(description="Distinct chapters this appears in — not last minus first")
 
 
+class ChapterProgress(BaseModel):
+    """One chapter split into vocabulary met for the first time and vocabulary
+    already known — the stacked bars on the text tab (issue #15).
+
+    Built at both grains, because "new" means different things at each: a lemma
+    the reader met in chapter 1 turning up in the aorist in chapter 9 is
+    *repeated* vocabulary and a *new* form, and which of those a chapter is full
+    of is the question the toggle exists to answer.
+
+    Types and tokens are both carried because they answer different halves of
+    it. Types are the vocabulary load — how many words to introduce; tokens are
+    how much of the running text those words account for. A chapter with 5 new
+    lemmas used 40 times is not the chapter its type count describes.
+
+    ``new_tokens + repeated_tokens`` is the chapter's token count exactly, at
+    either grain: every token has one lemma and one parse, so these partition.
+    ``new_types + repeated_types`` is its distinct-key count, which is
+    ``unique_lemmas`` at lemma grain.
+    """
+
+    chapter_index: int
+    new_types: int = Field(description="Keys appearing here for the first time in the corpus")
+    repeated_types: int = Field(description="Keys present here that the reader has already met")
+    new_tokens: int = Field(description="Occurrences here of keys new to this chapter")
+    repeated_tokens: int = Field(description="Occurrences here of keys met earlier")
+
+
 class TextSummary(BaseModel):
     chapter_count: int
     token_count: int
@@ -343,6 +370,14 @@ class TextReport(BaseModel):
     chapters: list[ChapterRefOut]
     lemma_rows: list[TextRow]
     parse_rows: list[TextRow]
+    lemma_progress: list[ChapterProgress] = Field(
+        default_factory=list,
+        description="Per-chapter new-vs-repeated split at lemma grain, one entry per chapter in reading order",
+    )
+    parse_progress: list[ChapterProgress] = Field(
+        default_factory=list,
+        description="The same split at lemma+parse grain",
+    )
     grammar: list[GrammarGroup] = Field(default_factory=list)
     form_combinations: FormCombinationTable | None = None
     coverage: CoverageReport | None = None

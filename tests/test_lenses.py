@@ -7,7 +7,7 @@ form the text does not contain.
 
 from __future__ import annotations
 
-from lingua_calc.corpus import CorpusIndex
+from lingua_calc.corpus import ChapterRef, CorpusIndex
 from lingua_calc.morphology import (
     Morphology,
     classify_combination,
@@ -165,10 +165,17 @@ def sig(parse: str) -> str:
     return signature(parse_morphology(parse))
 
 
-def combos(index, chapter_index=None) -> dict[str, dict[str, object]]:
+def combos(index) -> dict[str, dict[str, object]]:
     """Every combination row, flattened across groups and keyed by form."""
-    table = build_form_combinations(index, chapter_index)
+    table = build_form_combinations(index)
     return {r.form: r for g in table.groups for r in g.rows}
+
+
+def chapter_combos(index, chapter_index) -> dict[str, tuple[int, int]]:
+    """The join the client makes: a chapter's counts onto the corpus inventory,
+    a form with no count of its own defaulting to (0, 0)."""
+    counts = {c.order: (c.occ, c.cumulative) for c in build_combination_counts(index, chapter_index)}
+    return {form: counts.get(row.order, (0, 0)) for form, row in combos(index).items()}
 
 
 def form_class(parse: str) -> str:
@@ -252,11 +259,11 @@ def test_a_chapter_carries_a_zero_row_for_a_form_used_elsewhere():
     )
     index = CorpusIndex(facts)
 
-    first = combos(index, 0)
+    first = chapter_combos(index, 0)
 
-    assert first["gen. sg. masc."].occ == 0
-    assert first["gen. sg. masc."].first_chapter == 1, "still says where it does appear"
-    assert first["nom. sg. masc."].occ == 1
+    assert first["gen. sg. masc."] == (0, 0)
+    assert combos(index)["gen. sg. masc."].first_chapter == 1, "still says where it does appear"
+    assert first["nom. sg. masc."] == (1, 1)
 
 
 def test_combination_counts_are_cumulative_per_chapter():
@@ -268,9 +275,7 @@ def test_combination_counts_are_cumulative_per_chapter():
         ]
     )
 
-    row = combos(CorpusIndex(facts), 1)["nom. sg. masc."]
-
-    assert (row.occ, row.cumulative) == (2, 3)
+    assert chapter_combos(CorpusIndex(facts), 1)["nom. sg. masc."] == (2, 3)
 
 
 def test_rows_are_ordered_by_paradigm_not_alphabet():
@@ -296,15 +301,21 @@ def test_rows_are_ordered_by_paradigm_not_alphabet():
 
 
 def test_order_survives_a_scope_that_reorders_by_count():
-    """`order` is paradigm position, not rank in this scope, so it stays
-    meaningful after the reader re-sorts a table by count."""
+    """`order` is paradigm position, not rank in any one scope, so it stays
+    meaningful after the reader re-sorts a table by count — and a chapter's
+    counts join back on it rather than renumbering by what that chapter holds."""
     facts = facts_from(
         [("λύω", "λύω", "pres. act. ind. 3sg", 0), ("λύω", "λύω", "aor. act. ind. 3sg", 1)]
     )
     index = CorpusIndex(facts)
 
-    assert [r.order for r in build_form_combinations(index, 0).groups[0].rows] == [0, 1]
-    assert [r.order for r in build_form_combinations(index, 1).groups[0].rows] == [0, 1]
+    rows = build_form_combinations(index).groups[0].rows
+    assert [(r.form, r.order) for r in rows] == [
+        ("pres. act. ind. 3sg", 0),
+        ("aor. act. ind. 3sg", 1),
+    ]
+    counts = build_combination_counts(index, 1)
+    assert [(c.order, c.occ) for c in counts] == [(0, 0), (1, 1)], "the aorist keeps position 1"
 
 
 # -- one table per form class -----------------------------------------------
@@ -376,12 +387,11 @@ def test_the_set_of_tables_does_not_change_between_chapters():
     )
     index = CorpusIndex(facts)
 
-    first = build_form_combinations(index, 0)
-    second = build_form_combinations(index, 1)
+    table = build_form_combinations(index)
 
-    assert [g.key for g in first.groups] == [g.key for g in second.groups] == ["participle", "nominal"]
-    participles = next(g for g in first.groups if g.key == "participle")
-    assert participles.tokens == 0 and len(participles.rows) == 1
+    assert [g.key for g in table.groups] == ["participle", "nominal"]
+    assert len(next(g for g in table.groups if g.key == "participle").rows) == 1
+    assert chapter_combos(index, 0)["aor. act. part. nom. sg. masc."] == (0, 0), "none here yet"
 
 
 def test_combinations_ride_on_both_lenses():
@@ -391,34 +401,35 @@ def test_combinations_ride_on_both_lenses():
     assert build_text_report(index).form_combinations is not None
 
 
-def test_a_chapters_counts_rebuild_its_table_exactly():
+def test_a_chapters_counts_join_onto_the_text_inventory():
     """A chapter sends counts joined onto the text report's inventory rather
-    than its own copy of the table, so the join must reproduce what the chapter
-    table said — zero rows included, since "none here" is the answer."""
+    than its own copy of the table. Spelled out for both chapters, because the
+    running totals the join produces are the whole point of it."""
     index = CorpusIndex(TWO_CHAPTERS)
-    inventory = build_form_combinations(index)
 
-    for chapter_index in (0, 1):
-        counts = {c.order: (c.occ, c.cumulative) for c in build_combination_counts(index, chapter_index)}
-        rebuilt = {r.order: counts.get(r.order, (0, 0)) for g in inventory.groups for r in g.rows}
-
-        table = build_form_combinations(index, chapter_index)
-        assert rebuilt == {r.order: (r.occ, r.cumulative) for g in table.groups for r in g.rows}
+    assert combos(index)[NOM].occ == 4, "the inventory itself is corpus scope"
+    assert chapter_combos(index, 0) == {NOM: (2, 2), GEN: (1, 1)}
+    assert chapter_combos(index, 1) == {NOM: (2, 4), GEN: (1, 2)}
 
 
 def test_only_combinations_the_text_has_not_reached_are_omitted():
     """The payload saving, stated as a rule: an omitted row is (0, 0), so a form
     absent *here* but met earlier still travels with its running total."""
-    index = CorpusIndex(TWO_CHAPTERS)
-    inventory = build_form_combinations(index)
+    facts = facts_from(
+        [
+            (LOGOS, LOGOS, "nom. sg. masc.", 0),
+            (LOGOS, LOGOU, "gen. sg. masc.", 1),
+            ("λύω", "λύω", "aor. act. ind. 3sg", 2),
+        ]
+    )
+    index = CorpusIndex(facts)
+    order = {form: row.order for form, row in combos(index).items()}
 
-    counts = build_combination_counts(index, 1)
-    omitted = {r.order for g in inventory.groups for r in g.rows} - {c.order for c in counts}
+    counts = {c.order: (c.occ, c.cumulative) for c in build_combination_counts(index, 1)}
 
-    table = build_form_combinations(index, 1)
-    by_order = {r.order: r for g in table.groups for r in g.rows}
-    assert all(by_order[order].occ == 0 and by_order[order].cumulative == 0 for order in omitted)
-    assert all(c.occ or c.cumulative for c in counts)
+    assert counts[order["nom. sg. masc."]] == (0, 1), "absent here, but its total travels"
+    assert order["aor. act. ind. 3sg"] not in counts, "not reached by the end of chapter 1"
+    assert all(occ or cumulative for occ, cumulative in counts.values())
 
 
 # -- text lens (issues #5 / #15) --------------------------------------------
@@ -509,9 +520,83 @@ def test_text_report_spans_files():
     assert {c.filename for c in text.chapters} == {"one.docx", "two.docx"}
 
 
+# -- new vs. repeated progression (issue #15's stacked bars) -----------------
+
+
+def progress(text, grain="lemma"):
+    return {p.chapter_index: p for p in getattr(text, f"{grain}_progress")}
+
+
+def test_first_chapter_is_all_new():
+    """Nothing can be repeated before there is something to repeat."""
+    by_chapter = progress(build_text_report(CorpusIndex(TWO_CHAPTERS)))
+
+    assert (by_chapter[0].repeated_types, by_chapter[0].repeated_tokens) == (0, 0)
+    assert by_chapter[0].new_types == 2, "ὁ and λόγος"
+    assert by_chapter[0].new_tokens == 3
+
+
+def test_a_lemma_met_earlier_is_repeated_not_new():
+    by_chapter = progress(build_text_report(CorpusIndex(TWO_CHAPTERS)))
+
+    assert (by_chapter[1].new_types, by_chapter[1].new_tokens) == (0, 0)
+    assert by_chapter[1].repeated_types == 1, "λόγος only; ὁ is not in this chapter"
+    assert by_chapter[1].repeated_tokens == 3
+
+
+def test_the_two_grains_disagree_which_is_the_point_of_the_toggle():
+    """A known lemma in a form the reader has not met is repeated vocabulary
+    and new grammar. The toggle is the only thing that tells them apart."""
+    facts = facts_from([(LOGOS, LOGOS, NOM, 0), (LOGOS, LOGOU, GEN, 1)])
+    text = build_text_report(CorpusIndex(facts))
+
+    second_lemma = progress(text)[1]
+    second_parse = progress(text, "parse")[1]
+
+    assert (second_lemma.new_types, second_lemma.repeated_types) == (0, 1)
+    assert (second_parse.new_types, second_parse.repeated_types) == (1, 0)
+
+
+def test_the_split_partitions_the_chapter_at_either_grain():
+    """The bars stack to the chapter, so the two halves must add to it exactly
+    — a token counted in neither or in both would misstate the total the reader
+    reads off the axis."""
+    text = build_text_report(CorpusIndex(TWO_CHAPTERS))
+    totals = {0: 3, 1: 3}  # tokens per chapter in the fixture
+
+    for grain in ("lemma", "parse"):
+        for point in getattr(text, f"{grain}_progress"):
+            assert point.new_tokens + point.repeated_tokens == totals[point.chapter_index]
+
+    lemma_first = progress(text)[0]
+    assert lemma_first.new_types + lemma_first.repeated_types == 2, "unique lemmas in chapter 1"
+
+
+def test_every_chapter_gets_a_bar_including_an_empty_one():
+    """A heading the extractor found no tokens under is a fact about the text.
+    Dropping its entry would close the gap the bars are there to show."""
+    facts = facts_from([(LOGOS, LOGOS, NOM, 0), (LOGOS, LOGOS, NOM, 2)])
+    chapters = [
+        ChapterRef(index=i, id=f"{i + 1}-ch", title=f"Chapter {i + 1}", filename="a.docx")
+        for i in range(3)
+    ]
+
+    text = build_text_report(CorpusIndex(facts, chapters))
+
+    assert [p.chapter_index for p in text.lemma_progress] == [0, 1, 2]
+    empty = text.lemma_progress[1]
+    assert (empty.new_types, empty.repeated_types, empty.new_tokens, empty.repeated_tokens) == (
+        0,
+        0,
+        0,
+        0,
+    )
+
+
 def test_empty_corpus_produces_empty_tables_not_a_crash():
     text = build_text_report(CorpusIndex([]))
 
     assert text.lemma_rows == [] and text.parse_rows == []
     assert text.summary.token_count == 0
     assert text.grammar == []
+    assert text.lemma_progress == [] and text.parse_progress == []

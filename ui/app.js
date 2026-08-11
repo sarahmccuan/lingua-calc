@@ -467,12 +467,718 @@ function renderChapter(ch, root, inventory) {
   root.appendChild(details);
 }
 
+// -- charts (issue #15) -----------------------------------------------------
+//
+// Hand-rolled SVG, no charting library. The package is dependency-free on
+// purpose and two charts do not pay for a bundle, a build step and a second
+// theming system; what a library would give us here is a legend and an axis,
+// both of which are twenty lines.
+//
+// Both charts follow the same three rules:
+//   - Marks carry the colour, text never does. Labels, values and legends stay
+//     in the page's own ink, so a pale fill is never asked to be readable type.
+//   - Segments and cells are separated by a 2px gap in the surface, not by a
+//     stroke around them. A border adds ink that is not data and, at these
+//     sizes, thickens every small cell by a third.
+//   - Every chart has a table beside it. A tooltip is an enhancement, never the
+//     only way to read a number, which also keeps the figures reachable to a
+//     reader who never sees the chart at all.
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+function svgEl(name, attrs = {}, text = null) {
+  const el = document.createElementNS(SVG_NS, name);
+  for (const [key, value] of Object.entries(attrs)) {
+    if (value !== null && value !== undefined) el.setAttribute(key, String(value));
+  }
+  if (text !== null) el.textContent = text;
+  return el;
+}
+
+// A rounded data-end and a square baseline: the top of a column is the value
+// and gets the radius, the bottom is the axis and has to sit flat on it.
+function columnPath(x, y, w, h, radius = 4) {
+  const r = Math.max(0, Math.min(radius, w / 2, h));
+  if (r === 0) return `M${x} ${y}h${w}v${h}h${-w}Z`;
+  return (
+    `M${x} ${y + h}` +
+    `V${y + r}` +
+    `Q${x} ${y} ${x + r} ${y}` +
+    `H${x + w - r}` +
+    `Q${x + w} ${y} ${x + w} ${y + r}` +
+    `V${y + h}` +
+    "Z"
+  );
+}
+
+// Ticks land on 1/2/2.5/5 x 10^n so the reader divides by round numbers.
+// Without it the top tick reads 1,347 and every gridline below it is
+// arithmetic.
+function niceScale(max, count = 4) {
+  if (!(max > 0)) return { max: 1, ticks: [0, 1] };
+  const magnitude = 10 ** Math.floor(Math.log10(max / count));
+  const step =
+    [1, 2, 2.5, 5, 10].map((m) => m * magnitude).find((s) => s >= max / count) ?? 10 * magnitude;
+  const top = Math.ceil(max / step) * step;
+  const ticks = [];
+  for (let v = 0; v <= top + step / 1000; v += step) ticks.push(Math.round(v * 1000) / 1000);
+  return { max: top, ticks };
+}
+
+// One tooltip per chart, positioned against the chart's own box. Marks are
+// hovered *and* focused: a keyboard reader gets the same readout, which is the
+// reason the hit targets are elements rather than one mousemove handler over
+// the plot.
+function attachTip(host) {
+  const tip = document.createElement("div");
+  tip.className = "chart-tip";
+  tip.hidden = true;
+  host.appendChild(tip);
+  return {
+    show(html, target) {
+      tip.innerHTML = html;
+      tip.hidden = false;
+      const box = host.getBoundingClientRect();
+      const mark = target.getBoundingClientRect();
+      const clamp = (v, max) => Math.max(4, Math.min(v, max - 4));
+
+      // Above the mark by preference. When there is no room — a tall column, a
+      // cell near the top of the treemap — it goes *beside* the mark rather
+      // than below it: dropping it down would cover the thing being read.
+      let left = mark.left - box.left + mark.width / 2 - tip.offsetWidth / 2;
+      let top = mark.top - box.top - tip.offsetHeight - 8;
+      if (top < 0) {
+        const room = host.clientWidth - (mark.right - box.left);
+        left =
+          room >= tip.offsetWidth + 12
+            ? mark.right - box.left + 8
+            : mark.left - box.left - tip.offsetWidth - 8;
+        top = mark.top - box.top;
+      }
+      tip.style.left = `${clamp(left, host.clientWidth - tip.offsetWidth)}px`;
+      tip.style.top = `${clamp(top, host.clientHeight - tip.offsetHeight)}px`;
+    },
+    hide() {
+      tip.hidden = true;
+    },
+  };
+}
+
+// Both charts are laid out in pixels rather than in a scaled viewBox, so that
+// an 11px label is 11px whatever the panel is doing. That means they need a
+// width before they can be drawn — and a panel is built detached, so there is
+// none at build time. Draw once at a sensible default, then redraw when the
+// element learns how wide it is and whenever that changes.
+function autosize(host, draw, fallback = 820) {
+  draw(fallback);
+  if (typeof ResizeObserver !== "function") return;
+  let drawn = fallback;
+  new ResizeObserver(([entry]) => {
+    const width = Math.round(entry.contentRect.width);
+    // A few pixels either way is a scrollbar appearing, not a resize worth
+    // rebuilding a few hundred cells for.
+    if (!width || Math.abs(width - drawn) < 8) return;
+    drawn = width;
+    draw(width);
+  }).observe(host);
+}
+
+function chartCard(title, subtitle) {
+  const card = document.createElement("section");
+  card.className = "chart-card";
+  const head = document.createElement("div");
+  head.className = "chart-head";
+  head.innerHTML =
+    `<h4>${escapeHtml(title)}</h4>` +
+    `<p class="chart-sub muted">${escapeHtml(subtitle)}</p>`;
+  card.appendChild(head);
+  return { card, head };
+}
+
+// The legend is not optional and not a fallback. Two fills that differ only by
+// hue are one channel, and a reader who cannot separate those hues has nothing
+// left; identity always has a written form on screen.
+function chartLegend(entries) {
+  const el = document.createElement("ul");
+  el.className = "chart-legend";
+  el.innerHTML = entries
+    .map(
+      (e) =>
+        `<li><span class="chart-swatch series-${e.slot}"></span>${escapeHtml(e.label)}` +
+        (e.note ? ` <span class="muted">${escapeHtml(e.note)}</span>` : "") +
+        "</li>"
+    )
+    .join("");
+  return el;
+}
+
+function share(part, whole) {
+  return whole ? part / whole : 0;
+}
+
+// -- new vs. repeated vocabulary per chapter --------------------------------
+//
+// The progression half of the text lens: how much of each chapter the reader
+// has already met. "New" is the chapter a key's first occurrence falls in — the
+// same test as the `1st lemma` / `1st parse` badges on the chapter table, so
+// these bars are that column added up.
+//
+// Bars stack **types**, not tokens. The question the chart exists for is
+// vocabulary load — how many words this chapter asks the reader to learn — and
+// tokens answer a different one, how much of the running text those words
+// account for. Both travel on every point and the table view shows the pair;
+// only the bar height had to choose.
+//
+// Already-met sits at the baseline and new stacks on top: the vocabulary the
+// chapter can assume is the base it builds on, and the new words are what it
+// adds. The cost is that new no longer starts from a common baseline, so
+// comparing it across chapters means comparing segment lengths rather than
+// reading off the gridlines — the tooltip and the table view carry the exact
+// counts for when that is the question being asked.
+
+const PROGRESS_HEIGHT = 260;
+const PROGRESS_SLOT_MIN = 34; // also the hover target width, so it clears 24px
+const PROGRESS_SLOT_MAX = 200;
+
+// Chapters divide the panel between them until they would be narrower than a
+// hover target; past that the plot keeps its slot and scrolls. A four-chapter
+// text should not be a thumbnail in the corner of the card, and a sixty-chapter
+// one cannot be squeezed into it without putting the bars below a pixel.
+function progressSlot(n, available) {
+  if (!n) return PROGRESS_SLOT_MIN;
+  return Math.max(PROGRESS_SLOT_MIN, Math.min(PROGRESS_SLOT_MAX, Math.floor(available / n)));
+}
+
+function progressColumns(labels) {
+  return [
+    {
+      label: "chapter",
+      get: (r) => r.chapter_index,
+      type: "num",
+      align: "",
+      text: (r) => labels.short(r.chapter_index),
+      cellTitle: (r) => labels.long(r.chapter_index),
+    },
+    { label: "new", get: (r) => r.new_types, type: "num", title: "keys appearing here for the first time" },
+    { label: "already met", get: (r) => r.repeated_types, type: "num" },
+    {
+      label: "total",
+      get: (r) => r.new_types + r.repeated_types,
+      type: "num",
+      title: "distinct keys in this chapter — the height of the bar",
+    },
+    { label: "new tokens", get: (r) => r.new_tokens, type: "num", title: "occurrences here of the new keys" },
+    { label: "repeated tokens", get: (r) => r.repeated_tokens, type: "num" },
+    {
+      label: "tokens",
+      get: (r) => r.new_tokens + r.repeated_tokens,
+      type: "num",
+      title: "the chapter's token count — the two halves partition it exactly",
+    },
+    {
+      label: "% new",
+      get: (r) => share(r.new_types, r.new_types + r.repeated_types),
+      type: "num",
+      text: (r) => pct(share(r.new_types, r.new_types + r.repeated_types)),
+    },
+  ];
+}
+
+function progressPlot(points, labels, grainNoun, available) {
+  const host = document.createElement("div");
+  host.className = "chart-plot";
+
+  const n = points.length;
+  const margin = { top: 10, right: 10, bottom: 34, left: 46 };
+  const slot = progressSlot(n, available - margin.left - margin.right);
+  const width = margin.left + margin.right + Math.max(n, 1) * slot;
+  const height = PROGRESS_HEIGHT;
+  const baseline = height - margin.bottom;
+  const plotHeight = baseline - margin.top;
+
+  const totals = points.map((p) => p.new_types + p.repeated_types);
+  const scale = niceScale(Math.max(0, ...totals));
+  const y = (value) => baseline - (value / scale.max) * plotHeight;
+
+  const root = svgEl("svg", {
+    width,
+    height,
+    viewBox: `0 0 ${width} ${height}`,
+    class: "chart-svg",
+    role: "img",
+    "aria-label": `New versus already-met ${grainNoun} per chapter`,
+  });
+
+  for (const tick of scale.ticks) {
+    const ty = y(tick);
+    root.appendChild(
+      svgEl("line", { x1: margin.left, x2: width - margin.right, y1: ty, y2: ty, class: "chart-grid" })
+    );
+    root.appendChild(
+      svgEl(
+        "text",
+        { x: margin.left - 8, y: ty + 4, class: "chart-axis", "text-anchor": "end" },
+        tick.toLocaleString()
+      )
+    );
+  }
+
+  // Label every chapter until they would collide, then every k-th; the tooltip
+  // and the table carry the ones the axis drops.
+  const labelEvery = Math.ceil(n / 24);
+  const tip = attachTip(host);
+  // Thin, and thinner than its band: the leftover is the air between columns,
+  // so neighbours never read as one block.
+  const barWidth = Math.max(6, Math.min(32, slot - 10, Math.round(slot * 0.45)));
+
+  points.forEach((point, i) => {
+    const slotX = margin.left + i * slot;
+    const x = slotX + (slot - barWidth) / 2;
+    const total = point.new_types + point.repeated_types;
+    const metTop = y(point.repeated_types);
+    const stackTop = y(total);
+    // What the readout is anchored to. The hit target is the full height of the
+    // plot, so hanging the tooltip off that would park it at the top of the
+    // chart however short the column is; the top of the bar is where the reader
+    // is looking. Each branch reassigns it in draw order, so it ends up being
+    // whichever segment is on top.
+    let top = null;
+
+    if (point.repeated_types > 0) {
+      const h = baseline - metTop;
+      // Square top when the new segment stacks on it; the radius belongs to the
+      // end of the whole bar, not to the seam between two segments.
+      const d =
+        point.new_types > 0
+          ? columnPath(x, metTop, barWidth, h, 0)
+          : columnPath(x, metTop, barWidth, h);
+      top = svgEl("path", { d, class: "series-2" });
+      root.appendChild(top);
+    }
+    if (point.new_types > 0) {
+      // The 2px surface gap between the segments, taken off the upper one so
+      // the lower keeps its baseline and the stack keeps its top edge: the gap
+      // eats a pixel of ink, never a pixel of scale.
+      const bottom = point.repeated_types > 0 ? metTop - 2 : baseline;
+      top = svgEl("path", { d: columnPath(x, stackTop, barWidth, bottom - stackTop), class: "series-1" });
+      root.appendChild(top);
+    }
+
+    if (i % labelEvery === 0) {
+      root.appendChild(
+        svgEl(
+          "text",
+          { x: slotX + slot / 2, y: baseline + 16, class: "chart-axis", "text-anchor": "middle" },
+          labels.short(point.chapter_index)
+        )
+      );
+    }
+
+    const tokens = point.new_tokens + point.repeated_tokens;
+    const readout =
+      `<strong>${escapeHtml(labels.long(point.chapter_index))}</strong>` +
+      `<span><span class="chart-swatch series-1"></span>${point.new_types.toLocaleString()} new` +
+      ` <span class="muted">· ${point.new_tokens.toLocaleString()} tokens</span></span>` +
+      `<span><span class="chart-swatch series-2"></span>${point.repeated_types.toLocaleString()} already met` +
+      ` <span class="muted">· ${point.repeated_tokens.toLocaleString()} tokens</span></span>` +
+      `<span class="muted">${total.toLocaleString()} ${escapeHtml(grainNoun)} · ` +
+      `${tokens.toLocaleString()} tokens` +
+      (total ? ` · ${pct(share(point.new_types, total))} new` : "") +
+      "</span>";
+
+    const hit = svgEl("rect", {
+      x: slotX,
+      y: margin.top,
+      width: slot,
+      height: plotHeight,
+      class: "chart-hit",
+      tabindex: "0",
+      role: "button",
+      "aria-label":
+        `${labels.long(point.chapter_index)}: ${point.new_types} new, ` +
+        `${point.repeated_types} already met, ${total} ${grainNoun}`,
+    });
+    const show = () => tip.show(readout, top || hit);
+    hit.addEventListener("mouseenter", show);
+    hit.addEventListener("focus", show);
+    hit.addEventListener("mouseleave", () => tip.hide());
+    hit.addEventListener("blur", () => tip.hide());
+    root.appendChild(hit);
+  });
+
+  root.appendChild(
+    svgEl("line", {
+      x1: margin.left,
+      x2: width - margin.right,
+      y1: baseline,
+      y2: baseline,
+      class: "chart-axis-line",
+    })
+  );
+  root.appendChild(
+    svgEl(
+      "text",
+      {
+        x: margin.left + (width - margin.left - margin.right) / 2,
+        y: height - 4,
+        class: "chart-axis",
+        "text-anchor": "middle",
+      },
+      "chapter"
+    )
+  );
+
+  const scroll = document.createElement("div");
+  scroll.className = "chart-scroll";
+  scroll.appendChild(root);
+  host.appendChild(scroll);
+  return host;
+}
+
+function renderProgressionChart(textReport, labels) {
+  const { card, head } = chartCard(
+    "New vs. repeated vocabulary",
+    "Distinct words per chapter, split by whether the reader has met them before."
+  );
+
+  const controls = document.createElement("div");
+  controls.className = "chart-controls";
+  controls.innerHTML = `
+    <span class="segmented" role="group" aria-label="Row grain">
+      <button type="button" class="btn-quiet" data-grain="lemma">lemma</button>
+      <button type="button" class="btn-quiet" data-grain="parse">lemma + parse</button>
+    </span>
+    <button type="button" class="btn-quiet chart-view"></button>
+  `;
+  head.append(
+    chartLegend([
+      { slot: 1, label: "new here" },
+      { slot: 2, label: "already met" },
+    ]),
+    controls
+  );
+
+  const body = document.createElement("div");
+  body.className = "chart-body";
+  card.appendChild(body);
+
+  const viewButton = controls.querySelector(".chart-view");
+  let grain = "lemma";
+  let view = "chart";
+  let width = 820;
+
+  function note(text) {
+    return Object.assign(document.createElement("p"), { className: "muted", textContent: text });
+  }
+
+  function draw() {
+    const points = grain === "parse" ? textReport.parse_progress : textReport.lemma_progress;
+    const grainNoun = grain === "parse" ? "lemma+parse pairs" : "lemmas";
+    controls.querySelectorAll("[data-grain]").forEach((b) => {
+      b.classList.toggle("active", b.dataset.grain === grain);
+    });
+    viewButton.textContent = view === "chart" ? "Table" : "Chart";
+    if (!points.length) {
+      body.replaceChildren(note("This run has no chapters to chart."));
+      return;
+    }
+    if (view === "table") {
+      body.replaceChildren(buildTable(progressColumns(labels), points, { className: "table-narrow" }));
+      return;
+    }
+    // A single chapter is a single bar, and a single bar is a sentence with
+    // axes drawn around it: everything in the first chapter is new by
+    // definition, so there is no progression to plot yet.
+    if (points.length === 1) {
+      const only = points[0];
+      body.replaceChildren(
+        note(
+          `One chapter, so all ${only.new_types.toLocaleString()} ${grainNoun} in it are new — ` +
+            `${only.new_tokens.toLocaleString()} tokens. A second chapter is what makes this a progression.`
+        )
+      );
+      return;
+    }
+    body.replaceChildren(progressPlot(points, labels, grainNoun, width));
+  }
+
+  controls.querySelectorAll("[data-grain]").forEach((b) => {
+    b.addEventListener("click", () => {
+      grain = b.dataset.grain;
+      draw();
+    });
+  });
+  viewButton.addEventListener("click", () => {
+    view = view === "chart" ? "table" : "chart";
+    draw();
+  });
+
+  autosize(body, (available) => {
+    width = available;
+    draw();
+  });
+  return card;
+}
+
+// -- the form treemap -------------------------------------------------------
+//
+// The other half of "at a glance": which grammar the text is made of. Area is
+// occurrences and the four form classes are the four blocks, so "am I writing a
+// participle-heavy text" is answered by looking rather than by adding up a
+// column.
+//
+// A treemap is the right form here for one reason: these rows partition. Every
+// token carrying morphology sits in exactly one cell, so the areas are a whole
+// and dividing a rectangle up is an honest picture of it. The per-dimension
+// cards below could not be drawn this way — a syncretic `nom./acc.` is counted
+// under both its readings there, and area would double-count it.
+//
+// Squarified layout (Bruls, Huizing & van Wijk, 2000): cells are laid in rows
+// along the shorter side, and a row closes when adding another cell would make
+// the aspect ratio worse. The naive slice-and-dice alternative turns a few
+// hundred cells into unreadable, unhoverable slivers.
+
+function squarify(items, x, y, w, h) {
+  const out = [];
+  const total = items.reduce((sum, it) => sum + it.value, 0);
+  if (!items.length || total <= 0 || w <= 0 || h <= 0) return out;
+
+  const queue = items.slice();
+  const scale = (w * h) / total; // constant: each row consumes exactly its area
+  let area = { x, y, w, h };
+  let row = [];
+
+  const worst = (candidate) => {
+    if (!candidate.length) return Infinity;
+    const side = Math.min(area.w, area.h);
+    const sum = candidate.reduce((s, it) => s + it.value, 0) * scale;
+    const areas = candidate.map((it) => it.value * scale);
+    return Math.max(
+      (side * side * Math.max(...areas)) / (sum * sum),
+      (sum * sum) / (side * side * Math.min(...areas))
+    );
+  };
+
+  const place = (finished) => {
+    const side = Math.min(area.w, area.h);
+    const depth = (finished.reduce((s, it) => s + it.value, 0) * scale) / side;
+    const downward = area.w >= area.h; // the strip runs down the left edge of a wide area
+    let offset = 0;
+    for (const item of finished) {
+      const length = (item.value * scale) / depth;
+      out.push(
+        downward
+          ? { item, x: area.x, y: area.y + offset, w: depth, h: length }
+          : { item, x: area.x + offset, y: area.y, w: length, h: depth }
+      );
+      offset += length;
+    }
+    area = downward
+      ? { x: area.x + depth, y: area.y, w: area.w - depth, h: area.h }
+      : { x: area.x, y: area.y + depth, w: area.w, h: area.h - depth };
+  };
+
+  while (queue.length) {
+    if (!row.length || worst([...row, queue[0]]) <= worst(row)) {
+      row.push(queue.shift());
+    } else {
+      place(row);
+      row = [];
+    }
+  }
+  if (row.length) place(row);
+  return out;
+}
+
+const TREEMAP = { minWidth: 420, height: 400, header: 18, gap: 2 };
+
+// Slot 4 is a neutral grey rather than a fourth hue, on purpose. "Other" is the
+// bucket the classifier could not place, not a class anyone compares the others
+// against, and a fourth saturated hue would put yellow beside orange — a pair
+// full-colour readers separate by less than the floor these fills are held to.
+const FORM_CLASS_SLOT = { verb: 1, participle: 2, nominal: 3, other: 4 };
+
+// Roughly, at the weights these labels are set in. Deliberately generous: the
+// cost of over-estimating is a label this drops, and the cost of
+// under-estimating is one that spills over the edge of its cell.
+function fitsLabel(text, w, h, size) {
+  return h >= size + 6 && w >= text.length * size * 0.56 + 8;
+}
+
+function treemapPlot(table, width) {
+  const host = document.createElement("div");
+  host.className = "chart-plot";
+  const tip = attachTip(host);
+
+  const root = svgEl("svg", {
+    width,
+    height: TREEMAP.height,
+    viewBox: `0 0 ${width} ${TREEMAP.height}`,
+    class: "chart-svg",
+    role: "img",
+    "aria-label": "Treemap of grammatical forms, sized by occurrences",
+  });
+
+  const blocks = squarify(
+    table.groups.map((g) => ({ group: g, value: g.tokens })),
+    0,
+    0,
+    width,
+    TREEMAP.height
+  );
+
+  for (const block of blocks) {
+    const group = block.item.group;
+    const slot = FORM_CLASS_SLOT[group.key] || 4;
+    const inner = {
+      x: block.x + TREEMAP.gap / 2,
+      y: block.y + TREEMAP.gap / 2,
+      w: block.w - TREEMAP.gap,
+      h: block.h - TREEMAP.gap,
+    };
+
+    // The class name rides on the block itself, not only in the legend: it is
+    // the identity channel that survives a reader who cannot separate the
+    // fills, and it costs one strip of surface per block.
+    //
+    // Both parts are measured first. A narrow class — participles are a tenth
+    // of a text — has room for its name and not for its count, and letting the
+    // count run on would print it across the *next* block's name, which reads
+    // as one label belonging to the wrong colour.
+    const labelWidth = group.label.length * 6.8;
+    const count = `${group.tokens.toLocaleString()} tokens`;
+    if (inner.w >= labelWidth + 4) {
+      root.appendChild(
+        svgEl("text", { x: inner.x + 1, y: inner.y + 11, class: "chart-block-label" }, group.label)
+      );
+      if (inner.w >= labelWidth + count.length * 6 + 12) {
+        root.appendChild(
+          svgEl(
+            "text",
+            { x: inner.x + 1, y: inner.y + 11, dx: labelWidth + 8, class: "chart-axis" },
+            count
+          )
+        );
+      }
+    }
+
+    const rows = group.rows
+      .filter((r) => r.occ > 0)
+      .slice()
+      .sort((a, b) => b.occ - a.occ);
+    const cells = squarify(
+      rows.map((r) => ({ row: r, value: r.occ })),
+      inner.x,
+      inner.y + TREEMAP.header,
+      inner.w,
+      inner.h - TREEMAP.header
+    );
+
+    for (const cell of cells) {
+      const row = cell.item.row;
+      const w = cell.w - TREEMAP.gap;
+      const h = cell.h - TREEMAP.gap;
+      if (w <= 0.5 || h <= 0.5) continue; // thinner than the gap: nothing to draw
+      const x = cell.x + TREEMAP.gap / 2;
+      const y = cell.y + TREEMAP.gap / 2;
+
+      const rect = svgEl("rect", {
+        x,
+        y,
+        width: w,
+        height: h,
+        rx: Math.min(2, w / 2, h / 2),
+        class: `series-${slot} chart-cell`,
+        tabindex: "0",
+        role: "button",
+        "aria-label": `${row.form}, ${group.label}: ${row.occ} occurrences`,
+      });
+      const readout =
+        `<strong>${escapeHtml(row.form)}</strong>` +
+        `<span><span class="chart-swatch series-${slot}"></span>${escapeHtml(group.label)}</span>` +
+        `<span>${row.occ.toLocaleString()} occurrence${row.occ === 1 ? "" : "s"}` +
+        ` <span class="muted">· ${pct(share(row.occ, table.tokens))} of the morphology</span></span>` +
+        `<span class="muted">chapter${row.chapter_count === 1 ? "" : "s"} ` +
+        `${row.first_chapter + 1}–${row.last_chapter + 1} · in ${row.chapter_count} of them</span>`;
+      const show = () => tip.show(readout, rect);
+      rect.addEventListener("mouseenter", show);
+      rect.addEventListener("focus", show);
+      rect.addEventListener("mouseleave", () => tip.hide());
+      rect.addEventListener("blur", () => tip.hide());
+      root.appendChild(rect);
+
+      // Labels are measured before they are drawn. A clipped one is worse than
+      // none — it crops exactly the features that identify the cell — and every
+      // label here is a row in the form table below regardless.
+      if (fitsLabel(row.form, w, h, 11)) {
+        root.appendChild(
+          svgEl("text", { x: x + 4, y: y + 13, class: `chart-cell-label ink-${slot}` }, row.form)
+        );
+        const count = String(row.occ);
+        if (h >= 30 && fitsLabel(count, w, h - 14, 10)) {
+          root.appendChild(
+            svgEl("text", { x: x + 4, y: y + 25, class: `chart-cell-count ink-${slot}` }, count)
+          );
+        }
+      }
+    }
+  }
+
+  const scroll = document.createElement("div");
+  scroll.className = "chart-scroll";
+  scroll.appendChild(root);
+  host.appendChild(scroll);
+  return host;
+}
+
+function renderFormTreemap(table) {
+  const { card, head } = chartCard(
+    "Grammatical forms in the whole text",
+    "Every paradigm cell the text attests, sized by how often it occurs."
+  );
+  if (!table || !table.groups.length || !table.tokens) {
+    card.appendChild(
+      Object.assign(document.createElement("p"), {
+        className: "muted",
+        textContent: "No morphology was decoded in this run, so there is nothing to break down.",
+      })
+    );
+    return card;
+  }
+
+  head.appendChild(
+    chartLegend(
+      table.groups.map((g) => ({
+        slot: FORM_CLASS_SLOT[g.key] || 4,
+        label: g.label,
+        note: `${g.tokens.toLocaleString()} · ${pct(share(g.tokens, table.tokens))}`,
+      }))
+    )
+  );
+
+  const body = document.createElement("div");
+  body.className = "chart-body";
+  card.appendChild(body);
+  autosize(body, (available) =>
+    body.replaceChildren(treemapPlot(table, Math.max(TREEMAP.minWidth, available)))
+  );
+
+  const note = document.createElement("p");
+  note.className = "chart-note muted";
+  note.textContent =
+    `${table.tokens.toLocaleString()} tokens carry morphology, across ` +
+    `${table.groups.reduce((n, g) => n + g.rows.length, 0).toLocaleString()} distinct forms. ` +
+    "Every cell is a row in the form tables below, where it can be sorted and read exactly.";
+  card.appendChild(note);
+  return card;
+}
+
 // -- text lens (issues #5 / #15) --------------------------------------------
 //
-// One table, one grain toggle, mirroring the lemma/parse toggle already specced
-// for this tab's chart. The two grains answer different questions — "how much of
-// this word is in the text" versus "how much of this word *in this form*" — and
-// a lemma with eight parses is eight rows in one view and one in the other.
+// One table, one grain toggle — the same lemma/parse toggle the chart above it
+// carries. The two grains answer different questions — "how much of this word is
+// in the text" versus "how much of this word *in this form*" — and a lemma with
+// eight parses is eight rows in one view and one in the other.
 //
 // `chapter_count` is deliberately not derivable from first/last: a lemma in
 // chapters 1 and 20 spans twenty and appears in two, and that gap is the
@@ -544,6 +1250,18 @@ function renderTextPanel(textReport) {
   panel.appendChild(head);
 
   const labels = chapterLabels(textReport);
+
+  // Charts first: the tab's job is "at a glance", and the two questions it
+  // answers at a glance are how the vocabulary accumulates and what grammar the
+  // text is made of. The tables under them are the same numbers exactly, for
+  // when a glance is not enough.
+  const charts = document.createElement("div");
+  charts.className = "chart-stack";
+  charts.append(
+    renderProgressionChart(textReport, labels),
+    renderFormTreemap(textReport.form_combinations)
+  );
+  panel.appendChild(charts);
 
   const grammar = document.createElement("details");
   grammar.className = "grammar-details";

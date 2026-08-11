@@ -708,6 +708,294 @@ th.sortable.sort-desc::after {
   border-top: 1px solid var(--border);
 }
 
+/* -- charts (issue #15) ---------------------------------------------------
+   Four fills, used by both charts: new / already-met on the bars, and the
+   first three form classes plus a neutral on the treemap. They are a
+   *validated* set rather than four colours that looked distinct — checked for
+   lightness band, chroma, WCAG contrast against these two surfaces, and
+   separation under simulated protanopia and deuteranopia, all pairs (worst
+   pair 9.2 ΔE light / 9.4 dark against a floor of 8; worst unsimulated pair
+   24.0 / 20.9 against a floor of 15). Re-run that check before changing a
+   value; "these look different" is not the same test.
+
+   Slot 4 is grey by design. It is the treemap's "Other" bucket, and a fourth
+   saturated hue would have to sit beside the orange at a separation full-colour
+   readers cannot rely on.
+
+   `--series-N-ink` is the label colour for text sitting *on* that fill — white
+   or near-black, whichever clears contrast on it. Text anywhere else on a chart
+   wears the page's own ink, never the series colour. */
+:root {
+  --series-1: #2a78d6;
+  --series-1-ink: #ffffff;
+  --series-2: #eb6834;
+  --series-2-ink: #111111;
+  --series-3: #1baf7a;
+  --series-3-ink: #111111;
+  --series-4: #71717a;
+  --series-4-ink: #ffffff;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    /* The same four hues stepped for the dark surface, not an automatic flip:
+       the light steps sit below 3:1 on #18181b. */
+    --series-1: #3987e5;
+    --series-1-ink: #111111;
+    --series-2: #d95926;
+    --series-2-ink: #111111;
+    --series-3: #199e70;
+    --series-3-ink: #111111;
+    --series-4: #a1a1aa;
+    --series-4-ink: #111111;
+  }
+}
+
+.series-1 {
+  fill: var(--series-1);
+}
+
+.series-2 {
+  fill: var(--series-2);
+}
+
+.series-3 {
+  fill: var(--series-3);
+}
+
+.series-4 {
+  fill: var(--series-4);
+}
+
+.ink-1 {
+  fill: var(--series-1-ink);
+}
+
+.ink-2 {
+  fill: var(--series-2-ink);
+}
+
+.ink-3 {
+  fill: var(--series-3-ink);
+}
+
+.ink-4 {
+  fill: var(--series-4-ink);
+}
+
+.chart-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  margin-bottom: 1.25rem;
+}
+
+.chart-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.75rem 1rem 0.9rem;
+}
+
+.chart-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.35rem 1rem;
+}
+
+.chart-head h4 {
+  margin: 0;
+  font-size: 0.9375rem;
+  font-weight: 600;
+}
+
+.chart-sub {
+  margin: 0;
+  font-size: 0.8125rem;
+  /* Takes the rest of the first line so the legend and controls wrap to their
+     own row rather than being squeezed against the title. */
+  flex: 1 1 18rem;
+}
+
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.9rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.8125rem;
+}
+
+.chart-legend li {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.35rem;
+}
+
+.chart-swatch {
+  display: inline-block;
+  width: 0.65rem;
+  height: 0.65rem;
+  border-radius: 2px;
+  /* The swatch is the only place a chart colour appears in a line of text, and
+     it is a mark beside the label rather than the label itself. */
+  background: currentColor;
+  color: var(--series-1);
+}
+
+.chart-swatch.series-1 {
+  color: var(--series-1);
+}
+
+.chart-swatch.series-2 {
+  color: var(--series-2);
+}
+
+.chart-swatch.series-3 {
+  color: var(--series-3);
+}
+
+.chart-swatch.series-4 {
+  color: var(--series-4);
+}
+
+.chart-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-left: auto;
+}
+
+.chart-view {
+  padding: 0.2rem 0.7rem;
+  font-size: 0.8125rem;
+}
+
+.chart-body {
+  margin-top: 0.6rem;
+}
+
+.chart-plot {
+  position: relative;
+}
+
+/* A wide corpus makes a wide chart. Sixty chapters is 2000px of columns, and
+   squeezing them into the panel would put the bars below a pixel — so the plot
+   scrolls sideways, the same as the wide tables on this page. */
+.chart-scroll {
+  overflow-x: auto;
+}
+
+.chart-svg {
+  display: block;
+}
+
+.chart-grid {
+  stroke: var(--border);
+  stroke-width: 1;
+  /* Solid, not dashed: a dashed grid reads as a threshold or a projection when
+     it is only a ruler. */
+}
+
+.chart-axis-line {
+  stroke: var(--border);
+  stroke-width: 1;
+}
+
+.chart-axis {
+  fill: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.chart-block-label {
+  fill: var(--fg);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.chart-cell-label {
+  font-size: 11px;
+  pointer-events: none;
+}
+
+.chart-cell-count {
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.8;
+  pointer-events: none;
+}
+
+.chart-cell {
+  cursor: default;
+}
+
+.chart-cell:hover,
+.chart-cell:focus-visible {
+  /* The hover cue is a lift in the mark itself; an outline would add a stroke
+     around a cell whose neighbours are 2px away and read as a border. */
+  opacity: 0.75;
+  outline: none;
+}
+
+/* One target per column, the full height of the plot and the full width of the
+   slot — so a 4px-tall bar is still hoverable, and the target clears 24px. */
+.chart-hit {
+  fill: transparent;
+  cursor: default;
+}
+
+.chart-hit:hover,
+.chart-hit:focus-visible {
+  fill: var(--row-hover);
+  outline: none;
+}
+
+.chart-tip {
+  position: absolute;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 9rem;
+  max-width: 20rem;
+  padding: 0.4rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--header-bg);
+  color: var(--fg);
+  font-size: 0.75rem;
+  line-height: 1.45;
+  pointer-events: none;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+}
+
+/* `display: flex` above out-ranks the user agent's `[hidden] { display: none }`,
+   which parks the readout in the corner of every chart until first hover. */
+.chart-tip[hidden] {
+  display: none;
+}
+
+.chart-tip strong {
+  font-weight: 600;
+}
+
+/* Direct children only: a swatch or a muted aside inside one of these lines is
+   part of the line, not a line of its own. */
+.chart-tip > span {
+  display: block;
+}
+
+.chart-tip .chart-swatch {
+  margin-right: 0.3rem;
+}
+
+.chart-note {
+  margin: 0.6rem 0 0;
+  font-size: 0.8125rem;
+}
+
 /* -- text lens (issues #5 / #15) ------------------------------------------ */
 
 .text-summary {

@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, field
+from typing import Iterable
 
 from lingua_calc.corpus import CorpusIndex, MorphCoverage, Track
 from lingua_calc.models import (
+    ChapterProgress,
     ChapterRefOut,
     ChapterReport,
     ChapterSummary,
@@ -234,9 +236,7 @@ def build_combination_counts(index: CorpusIndex, chapter_index: int) -> list[Com
     return counts
 
 
-def build_form_combinations(
-    index: CorpusIndex, chapter_index: int | None = None
-) -> FormCombinationTable:
+def build_form_combinations(index: CorpusIndex) -> FormCombinationTable:
     """The full inventory of paradigm cells, split into one table per form class.
 
     Rows are every combination attested **anywhere in the corpus**, so a chapter
@@ -249,11 +249,14 @@ def build_form_combinations(
     rather than per chapter — the same rule the dimension cards use, so the set
     of tables does not change as the author pages between chapters.
 
-    ``order`` is paradigm position, not the row's rank in this scope, so it
+    The table is built once, at corpus scope: ``occ`` and ``cumulative`` are
+    both the corpus total, and a chapter view is the client joining
+    ``build_combination_counts`` onto these rows by ``order``.
+
+    ``order`` is paradigm position, not the row's rank in any one scope, so it
     stays meaningful after the reader re-sorts a table by count. It is also the
-    key ``build_combination_counts`` joins a chapter's counts back on, which is
-    why both read their ordering from ``_ordered_signatures`` rather than
-    sorting independently.
+    key that join runs on, which is why both read their ordering from
+    ``_ordered_signatures`` rather than sorting independently.
     """
     entries = _ordered_signatures(index)
 
@@ -262,10 +265,8 @@ def build_form_combinations(
         grouped[classify_combination(features)].append(
             FormCombination(
                 form=sig,
-                occ=track.total if chapter_index is None else track.count_in(chapter_index),
-                cumulative=(
-                    track.total if chapter_index is None else track.cumulative_through(chapter_index)
-                ),
+                occ=track.total,
+                cumulative=track.total,
                 first_chapter=track.first_chapter,
                 last_chapter=track.last_chapter,
                 chapter_count=track.chapter_count,
@@ -334,6 +335,48 @@ class _TextAccum:
         return max(self.forms, key=self.forms.__getitem__, default="")
 
 
+def build_progression(index: CorpusIndex, tracks: Iterable[Track]) -> list[ChapterProgress]:
+    """Split every chapter into first-encounter and already-met vocabulary.
+
+    ``tracks`` is one appearance history per key — every lemma, or every
+    lemma+parse pair. A key is *new* in the chapter that equals its
+    ``first_chapter`` and repeated in every later chapter it appears in, which
+    is the same rule the ``1st lemma`` / ``1st parse`` badges use on the chapter
+    table; the bars are that column added up.
+
+    Every chapter the index knows about gets an entry, including one that
+    produced no tokens. A registered-but-empty chapter is a real fact about the
+    text — a heading the extractor found nothing under — and dropping it would
+    silently close the gap in the bars where the reader can see it.
+    """
+    per_chapter: dict[int, ChapterProgress] = {
+        chapter_index: ChapterProgress(
+            chapter_index=chapter_index,
+            new_types=0,
+            repeated_types=0,
+            new_tokens=0,
+            repeated_tokens=0,
+        )
+        for chapter_index in index.chapter_indexes
+    }
+
+    for track in tracks:
+        first = track.first_chapter
+        for chapter_index in track.chapters:
+            point = per_chapter.get(chapter_index)
+            if point is None:  # a key outside the registered chapter set
+                continue
+            occ = track.count_in(chapter_index)
+            if chapter_index == first:
+                point.new_types += 1
+                point.new_tokens += occ
+            else:
+                point.repeated_types += 1
+                point.repeated_tokens += occ
+
+    return [per_chapter[chapter_index] for chapter_index in index.chapter_indexes]
+
+
 def build_text_report(index: CorpusIndex) -> TextReport:
     """Build the corpus-wide tables behind the text tab.
 
@@ -393,6 +436,8 @@ def build_text_report(index: CorpusIndex) -> TextReport:
         chapters=chapters,
         lemma_rows=lemma_rows,
         parse_rows=parse_rows,
+        lemma_progress=build_progression(index, (t for _, t in index.iter_lemmas())),
+        parse_progress=build_progression(index, (t for _, t in index.iter_parses())),
         grammar=build_grammar_groups(index),
         form_combinations=build_form_combinations(index),
         coverage=build_coverage(index.coverage()),
