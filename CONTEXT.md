@@ -50,6 +50,7 @@ The store was write-only from the app's point of view — runs accumulated but n
 | --- | --- |
 | `GET /api/runs?limit=&offset=` | one page of runs, newest first, plus `total` |
 | `GET /api/runs/{id}/report` | re-derive a stored run — no Bedrock call |
+| `GET /api/runs/{id}/lemma?lemma=&chapter=&limit=` | one lemma's lens over a stored run (issue #16) |
 | `DELETE /api/runs/{id}` | remove one run (API surface; the UI does not use it) |
 | `POST /api/runs/delete` | remove a selection, one VACUUM for the batch |
 
@@ -115,7 +116,7 @@ Measured on the stored `Basil To the Rich` run (4,213 tokens): 100% of morpholog
 
 ## Lenses (issues #14 / #15 / #16)
 
-The report is three tabs over one index, not three reports: **Chapters** (is *this* chapter right?), **Text** (is the whole progression right?), **Lemma** (where does *this word* live?). Only the first two are built; the third is a placeholder describing #16.
+The report is three tabs over one index, not three reports: **Chapters** (is *this* chapter right?), **Text** (is the whole progression right?), **Lemma** (where does *this word* live?).
 
 Tabs are lazy — the text table can be a couple of thousand rows, and building every lens on open would make the author pay for ones they never look at. The selected tab is module-level state in `ui/app.js`, so loading a stored run keeps you in the lens you were reading.
 
@@ -199,7 +200,30 @@ Rules shared by both, each of which had a visible failure behind it:
 
 **Table sorting is now data-driven.** `buildTable` takes column descriptors carrying their own accessor and kind; the previous implementation read values back out of the DOM and kept numeric/boolean columns in hard-coded index sets, which mis-sorts silently the moment a column is inserted — and #4 inserts four.
 
-**Not done:** the CSV export (issue #3) still has its original columns; `lemma_cum`/`parse_cum` and the text-lens grain are not in it.
+### Lemma tab (issue #16)
+
+One word at a time: how often it occurs broken out by parse, which chapters it lives in, and every place it is actually used. `stats.build_lemma_report` answers all three from one pass over `Track.chapters` — only the chapters containing the word are scanned — and every count still comes off the index, so a figure here and the same figure in the text lens are the same number.
+
+**This is the one lens that is not in the report payload.** A concordance for every lemma *is* the token stream a second time; carrying one per lemma would roughly double a 9 MB payload to ship several thousand words the author never opens. So it is a route (`GET /api/runs/{id}/lemma`), fetched for the one word being read. **The cost is that this lens needs a stored run** — the same constraint the CSV export has, and with `LINGUA_PERSIST_RUNS=false` the tab says which setting is in the way rather than showing an empty pane.
+
+Because a lemma is browsed a word at a time, `pipeline.load_run_index` caches the last two indexes in `index_cache`, keyed on `(database, run id)` — the run id alone would let an index built from one database answer for another. Runs are append-only, so a cached index cannot go stale; **deleting is the one operation that can, so `TokenStore.delete_runs` invalidates as part of deleting.** That lives in the store rather than in the two delete routes because `delete_run`/`delete_runs` are public: a caller that has to remember to invalidate is a caller that can forget, and forgetting means serving facts the database no longer has for the life of the process.
+
+The cache is a separate module for one reason: `store` has to invalidate, and `store` cannot import `pipeline`, which imports `store`. `index_cache` knows nothing about how an index is built — only which database a cached one came from.
+
+**Caching an index also makes it shared, which makes `Track`'s lazy freeze a concurrency question.** The report handlers are `def`, so FastAPI runs them in a threadpool, and an index now outlives the request that built it. `Track._freeze` therefore publishes its chapter list and its prefix sums in a single assignment: storing them in two slots let a second thread see the list already set and the sums still `None`, which is an intermittent 500 on the second browser tab.
+
+- **The occurrence lines are windows, not sentences.** The provider is asked not to emit punctuation, so the fact stream has no sentence boundary to cut on. Six tokens either side is the honest unit available, it stops at the chapter edge, and it is short there rather than padded. The panel says so under the list — an unlabelled window that starts mid-clause reads as analysis that lost a word.
+- **Every chapter gets a row, including the ones with none.** A lemma's distribution is as much about where it stops appearing as where it appears, and `gap_before` (a `Track` method already) names the size of a gap on the row that ends it. In the chart the empty chapters keep their slot and get a baseline tick; closing those gaps would erase what the `longest gap` figure is counting. They read out on hover but are not clickable, because the chapter `<select>` offers only chapters that contain the word — filtering to an empty one would leave a filter with no option to clear it from.
+- **The tables stay corpus-wide when the occurrence list is filtered.** `chapter` narrows the concordance only — re-scoping the tables to one chapter would make this the chapter lens with extra steps.
+- **A truncated list has to say so.** `καί` is thousands of lines, so the list is capped at 400 and the response carries `occurrences_total` beside it. Presenting a page as the whole is the one mistake this list can cause: "λόγος never appears after chapter 12" would be a false reading of a cut-off.
+- **By parse and by spelling are both tables, because they are transposes.** A spelling can carry several parses (`λόγοι` is nominative or vocative) and a parse several spellings; either table alone loses one of those readings.
+- **"Various kinds of organization"** is a group-by toolbar over the same lines — chapter, parse, spelling, or reading order — with reading order preserved inside every group, so a group is always a passage read forwards.
+
+**`buildTable` columns can now carry a `link`.** That is what makes the lemma column of the chapter and text tables the way *into* this lens: "and where else does this one turn up?" is asked where the word already is, not by retyping it into a search box on another tab. One delegated listener per table, because a text table is a couple of thousand rows and the row set is replaced on every sort.
+
+The picker is fed from `TextReport.lemma_rows`, so choosing a word costs no request, and search folds diacritics (NFD, strip combining marks) — an author reaching for `λόγος` types `λογος`, and a search that misses it reads as "that word is not in this text".
+
+**Not done:** the CSV export (issue #3) still has its original columns; `lemma_cum`/`parse_cum`, the text-lens grain and the concordance are not in it.
 
 ## Performance & throughput
 

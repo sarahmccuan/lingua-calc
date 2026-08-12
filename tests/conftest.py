@@ -14,8 +14,11 @@ HO_CAP = "Ὁ"
 TOU = "τοῦ"
 LOGOS = "λόγος"
 LOGOU = "λόγου"
+# One spelling, two parses — what the lemma lens's form table exists to show.
+LOGOI = "λόγοι"
 NOM = "nom. sg."
 GEN = "gen. sg."
+VOC = "voc. pl."
 
 
 def fact(

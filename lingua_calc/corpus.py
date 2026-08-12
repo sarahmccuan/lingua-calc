@@ -31,38 +31,45 @@ class Track:
     O(log n) rather than a rescan per row.
     """
 
-    __slots__ = ("total", "_per_chapter", "_chapters", "_prefix")
+    __slots__ = ("total", "_per_chapter", "_frozen")
 
     def __init__(self) -> None:
         self.total: int = 0
         self._per_chapter: dict[int, int] = {}
-        self._chapters: tuple[int, ...] | None = None
-        self._prefix: tuple[int, ...] | None = None
+        self._frozen: tuple[tuple[int, ...], tuple[int, ...]] | None = None
 
     def add(self, chapter_index: int, count: int = 1) -> None:
         self.total += count
         self._per_chapter[chapter_index] = self._per_chapter.get(chapter_index, 0) + count
-        self._chapters = None
-        self._prefix = None
+        self._frozen = None
 
-    def _freeze(self) -> None:
-        if self._chapters is not None:
-            return
-        chapters = tuple(sorted(self._per_chapter))
-        prefix = [0]
-        running = 0
-        for c in chapters:
-            running += self._per_chapter[c]
-            prefix.append(running)
-        self._chapters = chapters
-        self._prefix = tuple(prefix)
+    def _freeze(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
+        """The chapter list and its prefix sums, computed on first query.
+
+        Both halves are published in one assignment, and read back through a
+        local, because an index outlives the request that built it now
+        (``pipeline.load_run_index`` caches it) and the handlers that query it
+        run in a threadpool. Storing the two tuples separately let a second
+        thread see the chapter list already set and the prefix sums still
+        ``None``. Two threads racing here both compute the same answer, which
+        costs a duplicate sort and nothing else.
+        """
+        frozen = self._frozen
+        if frozen is None:
+            chapters = tuple(sorted(self._per_chapter))
+            prefix = [0]
+            running = 0
+            for c in chapters:
+                running += self._per_chapter[c]
+                prefix.append(running)
+            frozen = (chapters, tuple(prefix))
+            self._frozen = frozen
+        return frozen
 
     @property
     def chapters(self) -> tuple[int, ...]:
         """Chapter indexes this key appears in, ascending. Empty if never seen."""
-        self._freeze()
-        assert self._chapters is not None
-        return self._chapters
+        return self._freeze()[0]
 
     @property
     def chapter_count(self) -> int:
@@ -87,9 +94,8 @@ class Track:
 
         This is what issue #4's `cumulative occurrences` columns need.
         """
-        self._freeze()
-        assert self._chapters is not None and self._prefix is not None
-        return self._prefix[bisect_right(self._chapters, chapter_index)]
+        chapters, prefix = self._freeze()
+        return prefix[bisect_right(chapters, chapter_index)]
 
     def previous_chapter(self, chapter_index: int) -> int | None:
         """Nearest chapter strictly before ``chapter_index`` where this appeared."""

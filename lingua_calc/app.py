@@ -18,9 +18,11 @@ from lingua_calc.models import AnalyzeError
 from lingua_calc.pipeline import (
     analyze_docx_bytes,
     analyze_docx_files,
+    lemma_report_from_run,
     open_store,
     reports_from_run,
 )
+from lingua_calc.stats import LEMMA_OCCURRENCE_LIMIT
 from lingua_calc.store import TokenStore
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -152,6 +154,44 @@ def create_app() -> FastAPI:
         report = reports_from_run(run_id, settings=settings)
         if report is None:
             raise HTTPException(status_code=404, detail="No such run.")
+        return JSONResponse(json.loads(report.model_dump_json()))
+
+    @app.get("/api/runs/{run_id}/lemma")
+    def run_lemma(
+        run_id: str,
+        lemma: str,
+        limit: int = LEMMA_OCCURRENCE_LIMIT,
+        chapter: int | None = None,
+    ) -> JSONResponse:
+        """One lemma's lens over a stored run (issue #16).
+
+        Its own route rather than a section of the report, because a concordance
+        for every lemma *is* the token stream a second time: shipping one per
+        lemma would roughly double a payload already measured in megabytes, to
+        carry several thousand words the author will never open. So it is
+        fetched for the one word being read.
+
+        ``lemma`` is a query parameter, not a path segment: it is Greek, it can
+        contain the apostrophe of an elided form, and a path segment would put
+        both through an encoding round trip for nothing.
+
+        ``chapter`` narrows the occurrence list only — the tables stay
+        corpus-wide, because "where does this word live across the text" is the
+        question the lens exists for.
+        """
+        lemma = lemma.strip()
+        if not lemma:
+            raise HTTPException(status_code=400, detail="No lemma given.")
+        _require_store()
+        report = lemma_report_from_run(
+            run_id,
+            lemma,
+            settings=settings,
+            limit=max(1, min(limit, 5000)),
+            chapter_index=chapter,
+        )
+        if report is None:
+            raise HTTPException(status_code=404, detail="No such run, or that lemma is not in it.")
         return JSONResponse(json.loads(report.model_dump_json()))
 
     @app.delete("/api/runs/{run_id}")

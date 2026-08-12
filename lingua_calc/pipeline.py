@@ -6,14 +6,28 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable, Sequence
 
+from lingua_calc import index_cache
 from lingua_calc.clean_extracted_files import clean_chapters
 from lingua_calc.config import Settings, get_settings
 from lingua_calc.corpus import ChapterRef, CorpusIndex
 from lingua_calc.docx_extract import TextChapter, extract_chapters_from_docx
-from lingua_calc.models import DocumentReport, FileReport, MultiFileReport, ParsedToken, TokenFact
+from lingua_calc.models import (
+    DocumentReport,
+    FileReport,
+    LemmaReport,
+    MultiFileReport,
+    ParsedToken,
+    TokenFact,
+)
 from lingua_calc.nlp.base import LemmatizeParseProvider
 from lingua_calc.nlp.bedrock import BedrockClaudeProvider
-from lingua_calc.stats import build_chapter_report, build_text_report
+from lingua_calc.stats import (
+    LEMMA_CONTEXT_TOKENS,
+    LEMMA_OCCURRENCE_LIMIT,
+    build_chapter_report,
+    build_lemma_report,
+    build_text_report,
+)
 from lingua_calc.store import TokenStore, save_run_safely
 
 logger = logging.getLogger(__name__)
@@ -232,6 +246,33 @@ def analyze_docx_bytes(
     return DocumentReport(filename=filename, chapters=chapters)
 
 
+def load_run_index(
+    run_id: str,
+    store: TokenStore | None = None,
+    settings: Settings | None = None,
+) -> CorpusIndex | None:
+    """A stored run's index, from :mod:`index_cache` when possible.
+
+    ``None`` if the run is unknown. The cache is keyed on the database as well as
+    the run, so an explicit ``store`` argument is honoured rather than silently
+    answered from whatever was read last — see ``index_cache.key``. Resolving the
+    path is deliberately cheaper than opening the store: on a hit nothing touches
+    SQLite at all, which is the whole point of caching a lemma-at-a-time lens.
+    """
+    settings = settings or get_settings()
+    cache_key = index_cache.key(store.path if store is not None else settings.db_path, run_id)
+    cached = index_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    store = store or open_store(settings)
+    if store is None or store.get_run(run_id) is None:
+        return None
+    index = store.load_index(run_id)
+    index_cache.put(cache_key, index)
+    return index
+
+
 def reports_from_run(
     run_id: str,
     store: TokenStore | None = None,
@@ -242,13 +283,34 @@ def reports_from_run(
     The entry point for re-deriving statistics over an already-analyzed text —
     new columns and export grains can be developed against real data for free.
     """
-    settings = settings or get_settings()
-    store = store or open_store(settings)
-    if store is None or store.get_run(run_id) is None:
+    index = load_run_index(run_id, store=store, settings=settings)
+    if index is None:
         return None
-    index = store.load_index(run_id)
     return MultiFileReport(
         file_reports=build_file_reports(index),
         text_report=build_text_report(index),
         run_id=run_id,
+    )
+
+
+def lemma_report_from_run(
+    run_id: str,
+    lemma: str,
+    store: TokenStore | None = None,
+    settings: Settings | None = None,
+    *,
+    limit: int = LEMMA_OCCURRENCE_LIMIT,
+    chapter_index: int | None = None,
+    context: int = LEMMA_CONTEXT_TOKENS,
+) -> LemmaReport | None:
+    """One lemma's lens over a stored run (issue #16).
+
+    ``None`` covers both "no such run" and "no such lemma in it" — the caller
+    has nothing useful to say about either beyond "not found".
+    """
+    index = load_run_index(run_id, store=store, settings=settings)
+    if index is None:
+        return None
+    return build_lemma_report(
+        index, lemma, limit=limit, chapter_index=chapter_index, context=context
     )
