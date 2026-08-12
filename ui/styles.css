@@ -568,7 +568,8 @@ th.sortable.sort-desc::after {
    screen — dimmed, because the rows that carry a count are the ones being
    read. Removing it would make the question unanswerable from the table. */
 .grammar-table tr.zero td,
-.combinations tbody tr.zero td {
+.combinations tbody tr.zero td,
+.lemma-table-card tbody tr.zero td {
   color: var(--muted);
   opacity: 0.55;
 }
@@ -952,6 +953,20 @@ th.sortable.sort-desc::after {
   outline: none;
 }
 
+/* Where a column is a filter as well as a readout (the lemma lens), the chosen
+   one keeps the hover fill so the plot says which chapter the list below is
+   scoped to — the select is the other half of the same state. */
+.chart-hit.selected {
+  fill: var(--row-hover);
+}
+
+/* A chapter with no occurrences. It keeps its slot and gets a baseline mark:
+   the empty stretches are the answer to "where does this word live", so the
+   plot has to draw the absence rather than skip it. */
+.chart-empty-tick {
+  fill: var(--border);
+}
+
 .chart-tip {
   position: absolute;
   z-index: 2;
@@ -1053,4 +1068,317 @@ th.num {
   cursor: pointer;
   font-weight: 600;
   padding: 0.4rem 0;
+}
+
+/* -- lemma lens (issue #16) -----------------------------------------------
+   A picker down the side and one word's detail beside it. The picker stays put
+   while the detail scrolls: choosing the next word to look at is the loop this
+   tab exists for, and a list that scrolls away with the content makes every
+   choice a scroll back to the top first. */
+
+/* An in-cell link. Deliberately not styled as a link elsewhere on the page:
+   inside a dense table an underline on every lemma is a column of rules, so the
+   affordance is held back to hover and focus, where the pointer already is. */
+.cell-link {
+  padding: 0;
+  border: 0;
+  border-radius: 2px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: inherit;
+  cursor: pointer;
+}
+
+.cell-link:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.cell-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.lemma-layout {
+  display: grid;
+  grid-template-columns: 15rem minmax(0, 1fr);
+  gap: 1rem;
+  align-items: start;
+}
+
+@media (max-width: 720px) {
+  .lemma-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.lemma-picker {
+  position: sticky;
+  top: 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.6rem;
+  font-size: 0.8125rem;
+}
+
+.lemma-search {
+  width: 100%;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+}
+
+.lemma-picker-count {
+  margin: 0.4rem 0;
+  font-size: 0.75rem;
+}
+
+.lemma-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 32rem;
+  overflow-y: auto;
+}
+
+.lemma-option {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.2rem 0.35rem;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 0.8125rem;
+  text-align: left;
+}
+
+.lemma-option:hover {
+  background: var(--row-hover);
+}
+
+.lemma-option.active {
+  background: var(--row-hover);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.lemma-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  min-width: 0;
+}
+
+.lemma-error {
+  margin: 0;
+  color: var(--error);
+}
+
+.lemma-headline {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+}
+
+.lemma-title {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  margin-bottom: 0.6rem;
+}
+
+.lemma-word {
+  font-size: 1.75rem;
+  line-height: 1.2;
+}
+
+/* A row of figures rather than a table: each one is a single headline number
+   with its name under it, and there is nothing to compare down a column. */
+.lemma-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.75rem;
+}
+
+.lemma-stat {
+  display: flex;
+  flex-direction: column;
+}
+
+.lemma-stat-value {
+  font-size: 1.125rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.lemma-stat-label {
+  font-size: 0.75rem;
+}
+
+.lemma-table-card,
+.lemma-occurrences {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.75rem 1rem 0.9rem;
+}
+
+.lemma-table-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.35rem 0.75rem;
+  margin-bottom: 0.35rem;
+}
+
+.lemma-table-head h4,
+.lemma-occ-head h4 {
+  margin: 0;
+  font-size: 0.9375rem;
+  font-weight: 600;
+}
+
+.lemma-table-card .table-block {
+  border: 0;
+}
+
+.lemma-table-card .table-wrap {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  max-height: 24rem;
+  overflow-y: auto;
+}
+
+.lemma-table-card thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.lemma-table-card .sort-indicator {
+  min-height: 0;
+  padding: 0.2rem 0 0.15rem;
+}
+
+.lemma-occ-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.35rem 0.75rem;
+}
+
+.lemma-occ-count.warn {
+  color: var(--error);
+}
+
+.lemma-occ-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin-left: auto;
+  font-size: 0.8125rem;
+}
+
+.lemma-chapter-filter {
+  max-width: 16rem;
+  padding: 0.2rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  font-size: 0.8125rem;
+}
+
+.lemma-occ-note {
+  margin: 0.4rem 0 0.6rem;
+  font-size: 0.75rem;
+}
+
+.lemma-occ-body {
+  max-height: 34rem;
+  overflow-y: auto;
+}
+
+.lemma-occ-group + .lemma-occ-group {
+  margin-top: 0.75rem;
+}
+
+.lemma-occ-group-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  margin: 0 0 0.2rem;
+  padding: 0.2rem 0;
+  background: var(--bg);
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+
+.kwic-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* The classic concordance grid: left context runs back from the hit, right
+   context runs forward from it, and the hit itself forms a column down the
+   middle. That column is the whole point — scanning it is how a repeated
+   collocation becomes visible — so the context cells are fixed tracks that clip
+   rather than wrapping and pushing the hit around. */
+.kwic {
+  display: grid;
+  grid-template-columns: 3.5rem minmax(0, 1fr) auto minmax(0, 1fr) 9rem;
+  gap: 0 0.5rem;
+  align-items: baseline;
+  padding: 0.15rem 0.25rem;
+  border-radius: 4px;
+  font-size: 0.875rem;
+}
+
+.kwic:nth-child(even) {
+  background: var(--row-alt);
+}
+
+.kwic:hover {
+  background: var(--row-hover);
+}
+
+.kwic-loc {
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.kwic-before,
+.kwic-after {
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.kwic-before {
+  text-align: right;
+  /* The clip belongs at the far end of the context, not next to the hit: the
+     words nearest the word are the ones being read. */
+  direction: rtl;
+}
+
+.kwic-hit {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.kwic-parse {
+  font-size: 0.75rem;
+  text-align: right;
+  overflow: hidden;
+  white-space: nowrap;
 }

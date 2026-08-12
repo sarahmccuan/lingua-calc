@@ -383,6 +383,142 @@ class TextReport(BaseModel):
     coverage: CoverageReport | None = None
 
 
+# -- lemma lens (issue #16) -------------------------------------------------
+#
+# The third lens narrows to one word: every parse it wears, every chapter it
+# lives in, and every place it is actually used. Unlike the other two this is
+# not part of the report payload — a concordance for every lemma is the token
+# stream over again — so it is fetched per lemma and built on demand.
+
+
+class LemmaParseRow(BaseModel):
+    """One of a lemma's parses, counted across the whole corpus.
+
+    The "break out by parses" half of issue #16, at the same grain the text
+    lens's lemma+parse rows use, so a figure here matches the one there.
+    """
+
+    parse: str
+    type: str
+    occ: int
+    form: str = Field(description="Most frequent surface form carrying this parse — a representative")
+    form_count: int = Field(description="Distinct spellings this parse appears as")
+    first_chapter: int
+    last_chapter: int
+    chapter_count: int
+
+
+class LemmaFormRow(BaseModel):
+    """One surface spelling of a lemma, with the parses it is used for.
+
+    The transpose of ``LemmaParseRow``: a form can carry several parses
+    (``λόγου`` is only genitive, but ``λόγοι`` is nominative or vocative), and an
+    author asking "which endings has this word appeared in" is reading this
+    table rather than the one above.
+    """
+
+    form: str
+    occ: int
+    parses: list[str] = Field(
+        default_factory=list,
+        description="Every parse this spelling carries here, most frequent first",
+    )
+    first_chapter: int
+    last_chapter: int
+    chapter_count: int
+
+
+class LemmaParseCount(BaseModel):
+    """One parse's count inside one chapter — the "w/ parses" of issue #16's
+    second bullet, which asks for the chapter list broken down rather than as a
+    bare tally."""
+
+    parse: str
+    occ: int
+
+
+class LemmaChapterRow(BaseModel):
+    """One chapter's share of a lemma — **including the chapters that have none**.
+
+    Every chapter in the corpus gets a row. A lemma's distribution is as much
+    about where it stops appearing as where it appears, and a list of only the
+    chapters that contain it cannot show a gap; ``gap_before`` names the size of
+    one on the row that ends it.
+    """
+
+    chapter_index: int
+    occ: int
+    cumulative: int = Field(description="Occurrences from the start of the corpus through this chapter")
+    gap_before: int | None = Field(
+        default=None,
+        description="Chapters since its previous appearance. None on the first appearance and on chapters with no occurrence — a gap needs two ends.",
+    )
+    parses: list[LemmaParseCount] = Field(default_factory=list)
+
+
+class LemmaOccurrence(BaseModel):
+    """One token of the lemma, with the words either side of it.
+
+    ``before``/``after`` are neighbouring **tokens, not a sentence**. The
+    provider is asked not to emit punctuation (``nlp/bedrock.py``), so the fact
+    stream carries no sentence boundary to cut on and a fixed window is the
+    honest unit available. It never crosses a chapter boundary, and it is short
+    of the window at the start and end of a chapter rather than padded.
+    """
+
+    chapter_index: int
+    position: int
+    form: str
+    parse: str
+    before: list[str] = Field(default_factory=list)
+    after: list[str] = Field(default_factory=list)
+
+
+class LemmaSummary(BaseModel):
+    lemma: str
+    type: str = Field(description="Most frequent part of speech the provider gave this lemma")
+    total: int
+    parse_count: int
+    form_count: int
+    chapter_count: int = Field(description="Distinct chapters it appears in — not last minus first")
+    first_chapter: int
+    last_chapter: int
+    longest_gap: int | None = Field(
+        default=None,
+        description="Most chapters that ever passed between two appearances; None if it appears in only one",
+    )
+    corpus_tokens: int = Field(description="Tokens in the whole run, so a share can be shown against it")
+    corpus_chapters: int
+
+
+class LemmaReport(BaseModel):
+    """Everything the lemma lens shows for one word.
+
+    Built per request rather than shipped with the run: the occurrence list is
+    the token stream sliced a different way, so carrying one for every lemma
+    would roughly double a payload that is already megabytes.
+    """
+
+    summary: LemmaSummary
+    parses: list[LemmaParseRow]
+    forms: list[LemmaFormRow]
+    chapters: list[LemmaChapterRow]
+    chapter_refs: list[ChapterRefOut] = Field(
+        default_factory=list,
+        description="Chapter identity, so the tables above can be read as titles",
+    )
+    occurrences: list[LemmaOccurrence] = Field(default_factory=list)
+    occurrences_total: int = Field(
+        description="Occurrences in scope. Larger than len(occurrences) when the limit truncated the list — the caller must say so rather than presenting a page as the whole."
+    )
+    occurrence_limit: int
+    context_window: int = Field(description="Tokens carried either side of each occurrence")
+    chapter_filter: int | None = Field(
+        default=None,
+        description="Chapter the occurrence list was narrowed to; None means the whole corpus",
+    )
+
+
 class FileReport(BaseModel):
     filename: str
     chapters: list[ChapterReport]

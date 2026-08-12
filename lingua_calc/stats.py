@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from typing import Iterable
 
@@ -18,6 +18,13 @@ from lingua_calc.models import (
     FormStat,
     GrammarGroup,
     GrammarStat,
+    LemmaChapterRow,
+    LemmaFormRow,
+    LemmaOccurrence,
+    LemmaParseCount,
+    LemmaParseRow,
+    LemmaReport,
+    LemmaSummary,
     TextReport,
     TextRow,
     TextSummary,
@@ -413,18 +420,6 @@ def build_text_report(index: CorpusIndex) -> TextReport:
     lemma_rows.sort(key=order)
     parse_rows.sort(key=order)
 
-    chapters = []
-    for chapter_index in index.chapter_indexes:
-        ref = index.chapter_ref(chapter_index)
-        chapters.append(
-            ChapterRefOut(
-                chapter_index=chapter_index,
-                id=ref.id if ref else f"ch-{chapter_index + 1}",
-                title=ref.title if ref else "",
-                filename=ref.filename if ref else "",
-            )
-        )
-
     return TextReport(
         summary=TextSummary(
             chapter_count=index.chapter_count,
@@ -433,7 +428,7 @@ def build_text_report(index: CorpusIndex) -> TextReport:
             unique_forms=index.unique_forms,
             unique_parses=index.unique_parses,
         ),
-        chapters=chapters,
+        chapters=build_chapter_refs(index),
         lemma_rows=lemma_rows,
         parse_rows=parse_rows,
         lemma_progress=build_progression(index, (t for _, t in index.iter_lemmas())),
@@ -442,6 +437,26 @@ def build_text_report(index: CorpusIndex) -> TextReport:
         form_combinations=build_form_combinations(index),
         coverage=build_coverage(index.coverage()),
     )
+
+
+def build_chapter_refs(index: CorpusIndex) -> list[ChapterRefOut]:
+    """Chapter identity for every chapter in the run, in reading order.
+
+    Ships with any report whose tables are keyed by chapter *index*, so a column
+    of 0-based numbers can be read as titles without the client guessing.
+    """
+    refs = []
+    for chapter_index in index.chapter_indexes:
+        ref = index.chapter_ref(chapter_index)
+        refs.append(
+            ChapterRefOut(
+                chapter_index=chapter_index,
+                id=ref.id if ref else f"ch-{chapter_index + 1}",
+                title=ref.title if ref else "",
+                filename=ref.filename if ref else "",
+            )
+        )
+    return refs
 
 
 def _text_row(accum: _TextAccum, lemma: str, parse: str, track) -> TextRow:
@@ -457,4 +472,176 @@ def _text_row(accum: _TextAccum, lemma: str, parse: str, track) -> TextRow:
         first_chapter=track.first_chapter or 0,
         last_chapter=track.last_chapter or 0,
         chapter_count=track.chapter_count,
+    )
+
+
+# -- lemma lens (issue #16) -------------------------------------------------
+
+
+LEMMA_CONTEXT_TOKENS = 6
+"""Tokens carried either side of an occurrence.
+
+The provider is asked not to emit punctuation, so the fact stream has no
+sentence boundary to cut on and the concordance window is a fixed number of
+tokens instead. Six is about a line of Greek either side — enough to see what
+governs the word, short enough that a hundred of them still scan as a list.
+"""
+
+LEMMA_OCCURRENCE_LIMIT = 400
+"""Default cap on the occurrence list.
+
+``καί`` in a full text is thousands of lines, and shipping them all is both a
+slow response and a list nobody reads to the end of. The cap is reported
+alongside ``occurrences_total`` so a truncated list can never present itself as
+the whole; narrowing to a chapter is the way to see the rest.
+"""
+
+
+def build_lemma_report(
+    index: CorpusIndex,
+    lemma: str,
+    *,
+    limit: int = LEMMA_OCCURRENCE_LIMIT,
+    chapter_index: int | None = None,
+    context: int = LEMMA_CONTEXT_TOKENS,
+) -> LemmaReport | None:
+    """Everything issue #16 asks about one lemma. ``None`` if the corpus lacks it.
+
+    Three answers off one pass over the chapters that contain the word:
+
+    - **totals broken out by parse** (and its transpose, by surface form),
+    - **which chapters it lives in**, each with its own parse breakdown,
+    - **where it is actually used**, as concordance lines.
+
+    Only the chapters the lemma appears in are scanned — ``Track.chapters`` is
+    sparse — so this is proportional to the word, not to the corpus. The counts
+    themselves still come off the index rather than being re-derived here, so a
+    figure in this report and the same figure in the text lens are the same
+    number and cannot drift.
+
+    ``chapter_index`` narrows the *occurrence list* only. Every table stays
+    corpus-wide: the point of the lens is where a word lives across the whole
+    text, and re-scoping the tables to one chapter would make it the chapter
+    lens with extra steps.
+    """
+    track = index.lemma(lemma)
+    if track.total == 0:
+        return None
+
+    types: Counter[str] = Counter()
+    parse_forms: dict[str, Counter[str]] = defaultdict(Counter)
+    parse_types: dict[str, Counter[str]] = defaultdict(Counter)
+    form_parses: dict[str, Counter[str]] = defaultdict(Counter)
+    chapter_parses: dict[int, Counter[str]] = defaultdict(Counter)
+    occurrences: list[LemmaOccurrence] = []
+
+    for ci in track.chapters:
+        facts = index.facts_in(ci)
+        for i, f in enumerate(facts):
+            if f.lemma != lemma:
+                continue
+            types[f.type] += 1
+            parse_forms[f.parse][f.form] += 1
+            parse_types[f.parse][f.type] += 1
+            form_parses[f.form][f.parse] += 1
+            chapter_parses[ci][f.parse] += 1
+
+            if chapter_index is not None and ci != chapter_index:
+                continue
+            # The window is sliced out of this chapter's own fact list, so it
+            # stops at the chapter edge rather than running into the previous
+            # chapter's last words. It is short there, never padded: a blank
+            # would read as a word the analysis missed.
+            if len(occurrences) < limit:
+                occurrences.append(
+                    LemmaOccurrence(
+                        chapter_index=ci,
+                        position=f.position,
+                        form=f.form,
+                        parse=f.parse,
+                        before=[n.form for n in facts[max(0, i - context) : i]],
+                        after=[n.form for n in facts[i + 1 : i + 1 + context]],
+                    )
+                )
+
+    parses: list[LemmaParseRow] = []
+    for parse, spellings in parse_forms.items():
+        parse_track = index.parse(lemma, parse)
+        parses.append(
+            LemmaParseRow(
+                parse=parse,
+                type=parse_types[parse].most_common(1)[0][0],
+                occ=parse_track.total,
+                # Most frequent spelling wins, as everywhere else; `Counter`
+                # keeps insertion order on a tie, so the earliest seen breaks it.
+                form=spellings.most_common(1)[0][0],
+                form_count=len(spellings),
+                first_chapter=parse_track.first_chapter or 0,
+                last_chapter=parse_track.last_chapter or 0,
+                chapter_count=parse_track.chapter_count,
+            )
+        )
+    parses.sort(key=lambda r: (-r.occ, r.parse))
+
+    forms: list[LemmaFormRow] = []
+    for form, carried in form_parses.items():
+        form_track = index.form(lemma, form)
+        forms.append(
+            LemmaFormRow(
+                form=form,
+                occ=form_track.total,
+                parses=[p for p, _ in carried.most_common()],
+                first_chapter=form_track.first_chapter or 0,
+                last_chapter=form_track.last_chapter or 0,
+                chapter_count=form_track.chapter_count,
+            )
+        )
+    forms.sort(key=lambda r: (-r.occ, r.form))
+
+    chapters = [
+        LemmaChapterRow(
+            chapter_index=ci,
+            occ=track.count_in(ci),
+            cumulative=track.cumulative_through(ci),
+            # A gap belongs to the appearance that ends it. On a chapter with no
+            # occurrence there is nothing yet to measure to, and on the first
+            # appearance there is nothing to measure from — both are None rather
+            # than a zero that would read as "no gap".
+            gap_before=track.gap_before(ci) if track.count_in(ci) else None,
+            parses=[
+                LemmaParseCount(parse=parse, occ=occ)
+                for parse, occ in chapter_parses[ci].most_common()
+            ],
+        )
+        for ci in index.chapter_indexes
+    ]
+
+    appearances = track.chapters
+    gaps = [b - a for a, b in zip(appearances, appearances[1:])]
+
+    return LemmaReport(
+        summary=LemmaSummary(
+            lemma=lemma,
+            type=types.most_common(1)[0][0],
+            total=track.total,
+            parse_count=len(parses),
+            form_count=len(forms),
+            chapter_count=track.chapter_count,
+            first_chapter=track.first_chapter or 0,
+            last_chapter=track.last_chapter or 0,
+            longest_gap=max(gaps) if gaps else None,
+            corpus_tokens=index.total_tokens,
+            corpus_chapters=index.chapter_count,
+        ),
+        parses=parses,
+        forms=forms,
+        chapters=chapters,
+        chapter_refs=build_chapter_refs(index),
+        occurrences=occurrences,
+        occurrences_total=(
+            track.total if chapter_index is None else track.count_in(chapter_index)
+        ),
+        occurrence_limit=limit,
+        context_window=context,
+        chapter_filter=chapter_index,
     )

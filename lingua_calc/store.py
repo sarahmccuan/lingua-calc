@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Iterator, Sequence
 
+from lingua_calc import index_cache
 from lingua_calc.corpus import CorpusIndex
 from lingua_calc.models import TokenFact
 
@@ -247,6 +248,10 @@ class TokenStore:
         ones that no longer exist are skipped rather than raising, so a stale
         selection cannot fail the whole batch. Callers report this list rather
         than their own request, or they claim deletions that never happened.
+
+        Dropping the removed runs from :mod:`index_cache` is part of deleting,
+        not something callers opt into. A cached index outlives the request that
+        built it, and this is the only operation that can make one wrong.
         """
         ids = list(dict.fromkeys(run_ids))  # de-dupe, keep order
         if not ids:
@@ -265,6 +270,7 @@ class TokenStore:
                 conn.execute(f"DELETE FROM token_facts WHERE run_id IN ({marks})", present)
                 conn.execute(f"DELETE FROM runs WHERE id IN ({marks})", present)
         if present:
+            index_cache.forget(self.path, present)
             self.vacuum()
         return present
 

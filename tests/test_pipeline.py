@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from lingua_calc.pipeline import analyze_docx_bytes, analyze_docx_files, reports_from_run
+from lingua_calc.pipeline import (
+    analyze_docx_bytes,
+    analyze_docx_files,
+    lemma_report_from_run,
+    load_run_index,
+    reports_from_run,
+)
 from lingua_calc.store import TokenStore
 
 from .conftest import LOGOS, WordProvider, make_docx
@@ -133,6 +139,48 @@ def test_persistence_can_be_turned_off(settings):
 
 def test_unknown_run_id_returns_none(settings):
     assert reports_from_run("does-not-exist", settings=settings) is None
+
+
+def test_lemma_lens_reads_a_stored_run(settings):
+    docx = make_docx([("Chapter 1", f"{LOGOS} θεός"), ("Chapter 2", LOGOS)])
+    report = run([("book.docx", docx)], settings)
+
+    lens = lemma_report_from_run(report.run_id, LOGOS, settings=settings)
+
+    assert lens.summary.total == 2
+    assert [c.occ for c in lens.chapters] == [1, 1]
+    assert [o.chapter_index for o in lens.occurrences] == [0, 1]
+
+
+def test_lemma_lens_is_none_for_an_unknown_run_or_lemma(settings):
+    report = run([("a.docx", make_docx([(None, LOGOS)]))], settings)
+
+    assert lemma_report_from_run("does-not-exist", LOGOS, settings=settings) is None
+    assert lemma_report_from_run(report.run_id, "οὐδείς", settings=settings) is None
+
+
+def test_a_deleted_run_is_dropped_from_the_index_cache(settings):
+    """Deleting is the one operation that can make a cached index wrong — runs
+    are otherwise append-only, which is what makes caching them safe at all.
+
+    The delete invalidates on its own: no ``forget`` call here, because a caller
+    that has to remember one is a caller that can forget.
+    """
+    report = run([("a.docx", make_docx([(None, LOGOS)]))], settings)
+    assert load_run_index(report.run_id, settings=settings) is not None
+
+    TokenStore(settings.db_path).delete_runs([report.run_id])
+
+    assert load_run_index(report.run_id, settings=settings) is None
+
+
+def test_the_cache_does_not_answer_for_a_different_database(settings, tmp_path):
+    """The run id alone is not the identity of an index — the database is half of it."""
+    report = run([("a.docx", make_docx([(None, LOGOS)]))], settings)
+    assert load_run_index(report.run_id, settings=settings) is not None
+
+    elsewhere = TokenStore(tmp_path / "other.db")
+    assert load_run_index(report.run_id, store=elsewhere) is None
 
 
 def test_single_file_wrapper_returns_a_document_report(settings):
