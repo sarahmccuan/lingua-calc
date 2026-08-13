@@ -67,7 +67,9 @@ Four decisions worth not re-litigating:
 
 ## Export (issue #3)
 
-Every row of the run-history table carries an **Export CSV** button beside its **View** button. One file, one grain: **one row per chapter × lemma × parse** — the rows the report table shows, with the file and chapter they belong to spliced in so the whole corpus lands in a single flat sheet that pivots.
+Every row of the run-history table carries an **Export XLSX** button beside its **View** button. One workbook, two sheets, because it answers two different questions.
+
+**`Rows`** — the flat grain: **one row per chapter × lemma × parse**, the rows the report table shows, with the file and chapter they belong to spliced in so the whole corpus lands in a single sheet that pivots.
 
 | group | columns |
 | --- | --- |
@@ -77,12 +79,26 @@ Every row of the run-history table carries an **Export CSV** button beside its *
 | occurrence (this chapter) | `first_occ_lemma`, `first_occ_parse`, `last_occ_lemma`, `last_occ_parse` |
 | occurrence (corpus-wide) | `lemma_first_chapter`, `lemma_last_chapter`, `parse_first_chapter`, `parse_last_chapter` |
 
-- **On the run, not on the report.** Exporting is a per-run action, so any stored run can be pulled as CSV without first rendering it, and doing so does not disturb whatever report is already on screen. The cost: with `LINGUA_PERSIST_RUNS=false` the history panel is hidden entirely, so there is no export path at all — re-enable persistence to export.
-- **Built in the browser from `GET /api/runs/{id}/report`, not by a dedicated route.** That response *is* the displayed grain, so there is nothing extra to derive server-side, and re-deriving it costs nothing — no provider call.
+**`New lemmas by chapter`** — only the rows where a lemma appears for the first time in the corpus, collapsed to **one row per lemma**. A lemma is new exactly once, so this sheet is the vocabulary the text introduces, in the order it introduces it.
+
+| group | columns |
+| --- | --- |
+| identity | `file`, `chapter_index`, `chapter_id`, `chapter_title` |
+| word | `type`, `lemma`, `lemma_occ` (in this chapter) |
+| shapes met here | `form_count`, `forms`, `parse_count`, `parses` |
+| afterwards | `lemma_last_chapter`, `chapter_span` |
+
+- **On the run, not on the report.** Exporting is a per-run action, so any stored run can be pulled without first rendering it, and doing so does not disturb whatever report is already on screen. The cost: with `LINGUA_PERSIST_RUNS=false` the history panel is hidden entirely, so there is no export path at all — re-enable persistence to export.
+- **Built server-side now, by `GET /api/runs/{id}/export.xlsx` (`export.py`).** The CSV this replaces was assembled in the page from `GET /api/runs/{id}/report`, which an xlsx cannot be: it is a zip of XML parts, and hand-rolling a zip writer in a page script to save one round trip is a bad trade. The report is still re-derived from the store, so an export costs a rebuild and no provider call. What the move buys beyond the zip: both grains are now testable in the same suite as the statistics they carry (`tests/test_export.py`).
+- **Fetched as a blob, not navigated to.** A navigation would surface a failed export as a blank tab or a saved error page; fetching keeps it in the status line beside the button that asked. The counts come back as `X-Export-Rows` / `X-Export-New-Lemmas` headers so the status line can name both sheets without reading back the workbook it just saved.
+- **The second sheet is derivable from the first** — filter `first_occ_lemma`, then dedupe the parse rows down to the lemma — and is a sheet anyway, because that is a pivot the reader would rebuild every time, and "what does this chapter introduce" is the question the whole cumulative apparatus exists to answer.
+- **`forms` comes from `TokenRow.forms`, not from `form`.** `form` is only the group's most frequent spelling, so a lemma met as `Ὁ` and `ὁ` under one parse would lose one of them. Joined with ` · ` rather than a comma: a cell full of commas reads as a CSV that failed to split.
+- **`chapter_span` counts this chapter through `lemma_last_chapter` inclusive**, so `1` means the word is introduced and never seen again — the number an author scanning for one-offs is looking for.
 - **The `*_chapter` columns are the model's raw 0-based indexes**, left uncooked so they compare against `chapter_index`: a row is a lemma's first appearance exactly when `lemma_first_chapter == chapter_index`. The booleans beside them are that comparison already done, because "is this the first time?" is the question actually being asked.
-- **UTF-8 with a BOM, CRLF rows.** Every lemma and form is Greek and Excel reads a BOM-less UTF-8 CSV as the local codepage, i.e. as mojibake. The BOM is what makes the file openable by double-click instead of through the import wizard.
+- **No BOM, no codepage, no line endings.** xlsx stores its strings as UTF-8 inside the zip, so the CSV's BOM-and-CRLF workarounds for Excel's mojibake are gone with it.
+- **The filename goes out twice**, plain ASCII and RFC 5987 (`filename*`), because the source .docx may be named in Greek and the ASCII copy has had that stripped — `βίβλος.docx` exports as `lingua-calc-βίβλος-…xlsx` to anything modern and `lingua-calc--…xlsx` to anything else.
 - **Report order, not screen order.** The column sort is a reading aid; a spreadsheet re-sorts anyway.
-- **Not yet:** per-chapter or per-file downloads, an Excel workbook with a tab per chapter, and the form-level breakdown on `TokenRow.forms` (a second grain, so a second file — not more columns on this one).
+- **Not yet:** per-chapter or per-file downloads, a tab per chapter, and the form-level breakdown on `TokenRow.forms` at full grain (a third sheet, not more columns on the first).
 
 Note `chapter_id` is near-useless for Greek titles: `pipeline._slugify` strips non-ASCII, so `Κεφάλαιον α’` becomes `1--`. It is exported anyway because it is the id the rest of the system keys by; `chapter_index` is the column to join on.
 
@@ -204,7 +220,7 @@ Rules shared by both, each of which had a visible failure behind it:
 
 One word at a time: how often it occurs broken out by parse, which chapters it lives in, and every place it is actually used. `stats.build_lemma_report` answers all three from one pass over `Track.chapters` — only the chapters containing the word are scanned — and every count still comes off the index, so a figure here and the same figure in the text lens are the same number.
 
-**This is the one lens that is not in the report payload.** A concordance for every lemma *is* the token stream a second time; carrying one per lemma would roughly double a 9 MB payload to ship several thousand words the author never opens. So it is a route (`GET /api/runs/{id}/lemma`), fetched for the one word being read. **The cost is that this lens needs a stored run** — the same constraint the CSV export has, and with `LINGUA_PERSIST_RUNS=false` the tab says which setting is in the way rather than showing an empty pane.
+**This is the one lens that is not in the report payload.** A concordance for every lemma *is* the token stream a second time; carrying one per lemma would roughly double a 9 MB payload to ship several thousand words the author never opens. So it is a route (`GET /api/runs/{id}/lemma`), fetched for the one word being read. **The cost is that this lens needs a stored run** — the same constraint the workbook export has, and with `LINGUA_PERSIST_RUNS=false` the tab says which setting is in the way rather than showing an empty pane.
 
 Because a lemma is browsed a word at a time, `pipeline.load_run_index` caches the last two indexes in `index_cache`, keyed on `(database, run id)` — the run id alone would let an index built from one database answer for another. Runs are append-only, so a cached index cannot go stale; **deleting is the one operation that can, so `TokenStore.delete_runs` invalidates as part of deleting.** That lives in the store rather than in the two delete routes because `delete_run`/`delete_runs` are public: a caller that has to remember to invalidate is a caller that can forget, and forgetting means serving facts the database no longer has for the life of the process.
 
@@ -223,7 +239,7 @@ The cache is a separate module for one reason: `store` has to invalidate, and `s
 
 The picker is fed from `TextReport.lemma_rows`, so choosing a word costs no request, and search folds diacritics (NFD, strip combining marks) — an author reaching for `λόγος` types `λογος`, and a search that misses it reads as "that word is not in this text".
 
-**Not done:** the CSV export (issue #3) still has its original columns; `lemma_cum`/`parse_cum`, the text-lens grain and the concordance are not in it.
+**Not done:** the export's `Rows` sheet (issue #3) still has its original columns; `lemma_cum`/`parse_cum`, the text-lens grain and the concordance are not in it.
 
 ## Performance & throughput
 

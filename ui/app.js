@@ -1345,117 +1345,47 @@ function renderTextPanel(textReport, ctx) {
   return panel;
 }
 
-// -- CSV export (issue #3) --------------------------------------------------
+// -- Workbook export (issue #3) ---------------------------------------------
 //
 // Exporting is a per-run action, so it lives on the run in the history table
-// rather than on the report: you can pull the CSV for any stored run without
-// first rendering it, and without disturbing whatever is already on screen.
+// rather than on the report: you can pull the workbook for any stored run
+// without first rendering it, and without disturbing whatever is already on
+// screen.
 //
-// Built in the browser from `GET /api/runs/{id}/report` rather than from a
-// dedicated `export.csv` route. That response *is* the displayed grain, so
-// there is nothing extra to derive server-side, and re-deriving it is free —
-// no provider call. The cost of this placement is that a report reachable
-// without a stored run behind it (LINGUA_PERSIST_RUNS=false hides history
-// entirely) has no export path; re-enable persistence to export.
+// The file is built by `GET /api/runs/{id}/export.xlsx` (export.py), not here.
+// The CSV this replaces was assembled in the page from the report JSON, which
+// an xlsx cannot be: it is a zip of XML parts, and hand-rolling a zip writer in
+// a page script to save one round trip is a bad trade. So this end is only the
+// download.
 //
-// Grain is one row per chapter × lemma × parse: the rows the table shows, with
-// the file/chapter they belong to spliced in so the whole corpus lands in a
-// single flat file that pivots. Order is report order (first appearance in the
-// chapter), not whatever the on-screen sort happens to be — the sort is a
-// reading aid, and a spreadsheet re-sorts anyway.
+// Fetched as a blob rather than by pointing the browser at the URL, because a
+// navigation would surface a failed export as a blank tab or a saved error
+// page, where this keeps it in the status line next to the button that asked.
+//
+// A report reachable without a stored run behind it (LINGUA_PERSIST_RUNS=false
+// hides history entirely) has no export path; re-enable persistence to export.
 
-const EXPORT_HEADER = [
-  "file",
-  "chapter_index",
-  "chapter_id",
-  "chapter_title",
-  "type",
-  "lemma",
-  "form",
-  "parse",
-  "lemma_occ",
-  "parse_occ",
-  "form_occ",
-  "first_occ_lemma",
-  "first_occ_parse",
-  "last_occ_lemma",
-  "last_occ_parse",
-  "lemma_first_chapter",
-  "lemma_last_chapter",
-  "parse_first_chapter",
-  "parse_last_chapter",
-];
+const EXPORT_FALLBACK_FILENAME = "lingua-calc-report.xlsx";
 
-// `chapter_index` and the four `*_chapter` columns are the model's 0-based
-// corpus-wide indexes, left raw so they compare against each other: a row is a
-// lemma's first appearance exactly when lemma_first_chapter == chapter_index.
-// The booleans alongside them are that comparison already done, because "is
-// this the first time?" is the question the author actually asks.
-function exportRows(data) {
-  const rows = [];
-  for (const fileRep of data.file_reports || []) {
-    for (const ch of fileRep.chapters) {
-      for (const r of ch.rows) {
-        rows.push([
-          fileRep.filename,
-          ch.summary.chapter_index,
-          ch.summary.id,
-          ch.summary.title,
-          r.type,
-          r.lemma,
-          r.form,
-          r.parse,
-          r.lemma_occ,
-          r.parse_occ,
-          r.form_occ,
-          r.first_occ_lemma,
-          r.first_occ_parse,
-          r.last_occ_lemma,
-          r.last_occ_parse,
-          r.lemma_first_chapter,
-          r.lemma_last_chapter,
-          r.parse_first_chapter,
-          r.parse_last_chapter,
-        ]);
-      }
+// `filename*` is the RFC 5987 form and wins where both are present: the source
+// .docx may be named in Greek, and the plain `filename` beside it has had that
+// stripped down to ASCII for clients that understand nothing else.
+function filenameFromDisposition(header) {
+  if (!header) return EXPORT_FALLBACK_FILENAME;
+  const encoded = /filename\*=UTF-8''([^;]+)/i.exec(header);
+  if (encoded) {
+    try {
+      return decodeURIComponent(encoded[1]);
+    } catch {
+      // Malformed percent-encoding: fall through to the ASCII form rather than
+      // failing a download that has already succeeded.
     }
   }
-  return rows;
+  const plain = /filename="([^"]*)"/i.exec(header);
+  return (plain && plain[1]) || EXPORT_FALLBACK_FILENAME;
 }
 
-function csvCell(value) {
-  if (value === null || value === undefined) return "";
-  if (typeof value === "boolean") return value ? "TRUE" : "FALSE";
-  const s = String(value);
-  return /["\r\n,]/.test(s) ? `"${s.replaceAll('"', '""')}"` : s;
-}
-
-function toCsv(header, rows) {
-  // CRLF per RFC 4180; Excel is the likeliest destination and is happiest with it.
-  return [header, ...rows].map((row) => row.map(csvCell).join(",")).join("\r\n") + "\r\n";
-}
-
-function exportFilename(data) {
-  const d = new Date();
-  const p = (n) => String(n).padStart(2, "0");
-  const stamp = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`;
-  const names = (data.file_reports || []).map((f) => f.filename.replace(/\.docx$/i, ""));
-  // One source file names the export after it; several would make an unreadable
-  // filename, so they fall back to a count.
-  const base =
-    names.length === 1
-      ? names[0].replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-|-$/g, "")
-      : `${names.length}-files`;
-  return `lingua-calc-${base || "report"}-${stamp}.csv`;
-}
-
-function downloadCsv(filename, text) {
-  // Every lemma and form in here is Greek, and Excel reads a BOM-less UTF-8 CSV
-  // as the local codepage — i.e. as mojibake. The leading U+FEFF is what makes
-  // the file openable by double-click rather than through the import wizard.
-  // Spelled as a char code so the BOM cannot be lost to an editor or a tool
-  // that strips it from source on save.
-  const blob = new Blob([String.fromCharCode(0xfeff), text], { type: "text/csv;charset=utf-8" });
+function downloadBlob(filename, blob) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -1506,8 +1436,8 @@ function renderChaptersPanel(data, ctx) {
 // Unlike the other two tabs this one is not built from the report payload. A
 // concordance for every lemma *is* the token stream a second time, so the
 // occurrences are fetched per lemma from `GET /api/runs/{id}/lemma` — which
-// means this lens needs a stored run behind it, the same constraint the CSV
-// export has and for the same reason.
+// means this lens needs a stored run behind it, the same constraint the
+// workbook export has and for the same reason.
 //
 // The occurrence lines are windows of tokens, not sentences. The provider is
 // asked not to emit punctuation (nlp/bedrock.py), so the fact stream has no
@@ -2064,9 +1994,9 @@ function renderLemmaPanel(data, ctx) {
     panel.innerHTML = `<p class="muted">This report has no text-wide data, so there is no vocabulary to focus on. Re-run the analysis to build it.</p>`;
     return panel;
   }
-  // Same constraint the CSV export has: this lens reads the stored run rather
-  // than the payload, so with LINGUA_PERSIST_RUNS=false there is nothing behind
-  // it. Say which setting, rather than showing an empty pane.
+  // Same constraint the workbook export has: this lens reads the stored run
+  // rather than the payload, so with LINGUA_PERSIST_RUNS=false there is nothing
+  // behind it. Say which setting, rather than showing an empty pane.
   if (!data.run_id) {
     panel.innerHTML = `<p class="muted">The lemma lens reads occurrences back from the stored run, and this report has none — run history is switched off (<code>LINGUA_PERSIST_RUNS=false</code>). Re-enable it and analyze again to use this tab.</p>`;
     return panel;
@@ -2400,7 +2330,7 @@ function renderHistory(page, handlers) {
       <td class="muted">${escapeHtml(model)}</td>
       <td class="history-actions">
         <button type="button" class="btn-quiet" data-act="view">View</button>
-        <button type="button" class="btn-quiet" data-act="export">Export CSV</button>
+        <button type="button" class="btn-quiet" data-act="export">Export XLSX</button>
       </td>
     `;
     const box = tr.querySelector('[data-act="select"]');
@@ -2411,9 +2341,9 @@ function renderHistory(page, handlers) {
     });
     tr.querySelector('[data-act="view"]').addEventListener("click", () => onView(run, label));
 
-    // Export has to fetch the run's report first, which on a large run is not
-    // instant — hold the button down for the round trip so a second click
-    // cannot start a second download of the same thing.
+    // The workbook is built server-side from a re-derived report, which on a
+    // large run is not instant — hold the button down for the round trip so a
+    // second click cannot start a second download of the same thing.
     const exportBtn = tr.querySelector('[data-act="export"]');
     exportBtn.addEventListener("click", async () => {
       exportBtn.disabled = true;
@@ -2490,22 +2420,24 @@ function main() {
   // to look at it, and swapping the report out from under the reader would be a
   // surprising side effect of asking for a download.
   async function exportRun(run, label) {
-    setStatus(status, `Building CSV for ${label}…`);
+    setStatus(status, `Building workbook for ${label}…`);
     try {
-      const res = await fetch(`/api/runs/${run.id}/report`);
+      const res = await fetch(`/api/runs/${run.id}/export.xlsx`);
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
-        setStatus(status, body.detail || "Could not load that run.", true);
+        setStatus(status, body.detail || "Could not export that run.", true);
         return;
       }
-      const data = await res.json();
-      const rows = exportRows(data);
-      if (!rows.length) {
-        setStatus(status, `That run has no rows to export.`, true);
-        return;
-      }
-      downloadCsv(exportFilename(data), toCsv(EXPORT_HEADER, rows));
-      setStatus(status, `Exported ${rows.length.toLocaleString()} rows from ${label}.`);
+      const blob = await res.blob();
+      downloadBlob(filenameFromDisposition(res.headers.get("Content-Disposition")), blob);
+      // Counted server-side and sent as headers, so the status line can name
+      // both sheets without the page reading back the workbook it just saved.
+      const rows = Number(res.headers.get("X-Export-Rows") || 0);
+      const fresh = Number(res.headers.get("X-Export-New-Lemmas") || 0);
+      setStatus(
+        status,
+        `Exported ${rows.toLocaleString()} rows and ${fresh.toLocaleString()} new lemmas from ${label}.`,
+      );
     } catch (e) {
       setStatus(status, String(e), true);
     }

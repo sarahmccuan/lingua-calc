@@ -6,14 +6,18 @@ import json
 import queue
 import threading
 import traceback
+import unicodedata
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import FastAPI, File, HTTPException, UploadFile, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from lingua_calc.config import get_settings
+from lingua_calc.export import MEDIA_TYPE as XLSX_MEDIA_TYPE
+from lingua_calc.export import build_export
 from lingua_calc.models import AnalyzeError
 from lingua_calc.pipeline import (
     analyze_docx_bytes,
@@ -155,6 +159,48 @@ def create_app() -> FastAPI:
         if report is None:
             raise HTTPException(status_code=404, detail="No such run.")
         return JSONResponse(json.loads(report.model_dump_json()))
+
+    @app.get("/api/runs/{run_id}/export.xlsx")
+    def run_export(run_id: str) -> Response:
+        """A stored run as a workbook (issue #3).
+
+        Its own route rather than a flag on the report because the response is a
+        file, not JSON: the browser downloads it, and there is no report on
+        screen it needs to agree with. Same re-derivation as ``run_report``, so
+        exporting a run costs a rebuild and no provider call.
+
+        The filename goes out twice — plain ASCII, then RFC 5987 — because the
+        source .docx may be named in Greek, and a client that only understands
+        the bare ``filename`` should still get something it can save.
+        """
+        report = reports_from_run(run_id, settings=settings)
+        if report is None:
+            raise HTTPException(status_code=404, detail="No such run.")
+
+        export = build_export(report)
+        if export.row_count == 0:
+            raise HTTPException(status_code=409, detail="That run has no rows to export.")
+
+        # Always non-empty: the name is built around an ASCII "lingua-calc-"
+        # prefix and a date, and only the middle can be Greek.
+        ascii_name = unicodedata.normalize("NFKD", export.filename).encode("ascii", "ignore").decode()
+        return Response(
+            content=export.content,
+            media_type=XLSX_MEDIA_TYPE,
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="{ascii_name}"; '
+                    f"filename*=UTF-8''{quote(export.filename)}"
+                ),
+                # What the UI puts in its status line, so it can report the size
+                # of the export without parsing the workbook it just downloaded.
+                "X-Export-Rows": str(export.row_count),
+                "X-Export-New-Lemmas": str(export.new_lemma_count),
+                "Access-Control-Expose-Headers": (
+                    "Content-Disposition, X-Export-Rows, X-Export-New-Lemmas"
+                ),
+            },
+        )
 
     @app.get("/api/runs/{run_id}/lemma")
     def run_lemma(
