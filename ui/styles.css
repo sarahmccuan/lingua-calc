@@ -216,24 +216,24 @@ tbody tr:hover {
 
 th.sortable {
   cursor: pointer;
-  position: relative;
-  /* Room for the sort arrow, which is absolutely positioned at the right edge.
-     Without it the arrow sits on top of the label in any column narrow enough
-     to matter — which, now that the counts are right-aligned, is most of them. */
-  padding-right: 1.5rem;
 }
 
+/* The arrow rides with the label instead of being pinned to the right edge of
+   the cell (issue #17). The table is wider than its content, so the columns get
+   stretched and a pinned arrow drifted an inch or more away from the name it
+   sorts by — near enough to the next header to read as belonging to it. Inline
+   it stays attached to its own label whatever the column width, and the header
+   inherits the ordinary cell padding rather than reserving a gutter. */
 th.sortable::after {
   content: "";
-  position: absolute;
-  right: 0.5rem;
-  top: 50%;
+  display: inline-block;
+  vertical-align: middle;
+  margin-left: 0.3rem;
   width: 0;
   height: 0;
   border-left: 5px solid transparent;
   border-right: 5px solid transparent;
   border-top: 6px solid var(--muted);
-  transform: translateY(-50%);
   opacity: 0.6;
 }
 
