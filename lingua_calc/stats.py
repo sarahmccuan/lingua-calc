@@ -4,7 +4,9 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from typing import Iterable
 
+from lingua_calc import lexicon as lexicon_mod
 from lingua_calc.corpus import CorpusIndex, MorphCoverage, Track
+from lingua_calc.lexicon import Lexicon
 from lingua_calc.models import (
     ChapterProgress,
     ChapterRefOut,
@@ -25,6 +27,16 @@ from lingua_calc.models import (
     LemmaParseRow,
     LemmaReport,
     LemmaSummary,
+    LexiconBand,
+    LexiconChapterOcc,
+    LexiconChapterProgress,
+    LexiconEntryRow,
+    LexiconGapRow,
+    LexiconMatchReport,
+    LexiconRef,
+    LexiconReport,
+    LexiconSummary,
+    OffListRow,
     TextReport,
     TextRow,
     TextSummary,
@@ -645,3 +657,392 @@ def build_lemma_report(
         context_window=context,
         chapter_filter=chapter_index,
     )
+
+
+# -- lexicon lens -----------------------------------------------------------
+#
+# Every other builder in this module reads the text and reports what is in it.
+# This one starts from a fixed list and reports how much of it the text has
+# delivered, which inverts every denominator: the interesting rows are as often
+# the ones with `occ == 0` as the ones with counts, because an entry the text
+# has never used is exactly the thing an author is looking for.
+
+# Ranks are banded 500 at a time. Wide enough that a band is a meaningful
+# stratum of the language rather than noise, narrow enough that ten of them fit
+# on screen as a single readable row of bars.
+LEXICON_BAND_SIZE = 500
+
+# Heads of two unbounded tables. Both are ordered so that the head is the part
+# worth reading — gaps by rank (commonest first), off-list by frequency — and
+# both ship a total beside them so a truncated list never reads as a complete
+# one.
+LEXICON_GAP_LIMIT = 200
+LEXICON_OFF_LIST_LIMIT = 200
+
+
+@dataclass
+class _EntryAccum:
+    """What the text did with one list entry, accumulated across every text
+    lemma that resolved to it.
+
+    Plural sources are normal, not an edge case: ``οὕτω`` and ``οὕτως`` are two
+    lemmas in the fact stream and one word in the list, so their counts add and
+    the entry's first chapter is the earlier of the two.
+    """
+
+    occ: int = 0
+    chapters: Counter = field(default_factory=Counter)
+    sources: Counter = field(default_factory=Counter)
+    matched_by: str = ""
+    ambiguous: bool = False
+
+    def add(self, lemma: str, track: Track, how: str, ambiguous: bool) -> None:
+        self.occ += track.total
+        self.sources[lemma] += track.total
+        for chapter_index in track.chapters:
+            self.chapters[chapter_index] += track.count_in(chapter_index)
+        # Strictest wins, so a word reachable both exactly and by fold is
+        # reported as exact — the report should credit the best evidence it has,
+        # not the last one it happened to try.
+        if not self.matched_by or _MATCH_STRENGTH[how] < _MATCH_STRENGTH[self.matched_by]:
+            self.matched_by = how
+        self.ambiguous = self.ambiguous or ambiguous
+
+    @property
+    def first_chapter(self) -> int | None:
+        return min(self.chapters) if self.chapters else None
+
+    @property
+    def source_lemma(self) -> str:
+        """The text lemma to send a reader to when they click this entry.
+
+        The entry's own headword will not do: it may carry a homograph digit
+        (``ὅς2``), or be the spelling the list cites rather than the one the
+        text uses (``ἐθέλω`` for a text's ``θέλω``). Neither exists in the
+        lemma lens, so linking the headword lands on nothing.
+
+        Commonest first where several lemmas resolved here, with the lemma
+        itself breaking ties so the same run always produces the same link.
+        """
+        if not self.sources:
+            return ""
+        return min(self.sources, key=lambda lemma: (-self.sources[lemma], lemma))
+
+
+_MATCH_STRENGTH = {lexicon_mod.EXACT: 0, lexicon_mod.ALIAS: 1, lexicon_mod.FOLDED: 2}
+
+
+def build_lexicon_report(
+    index: CorpusIndex,
+    lexicon: Lexicon,
+    *,
+    gap_limit: int = LEXICON_GAP_LIMIT,
+    off_list_limit: int = LEXICON_OFF_LIST_LIMIT,
+) -> LexiconReport:
+    """Benchmark a run against a ranked vocabulary list.
+
+    One pass over the index's lemmas resolves each against the list; everything
+    else is arithmetic over the result. The counts come off ``Track`` exactly as
+    they do everywhere else in this module, so a figure here agrees with the
+    text tab by construction rather than by a second implementation.
+    """
+    accums: dict[int, _EntryAccum] = {}
+    types = _dominant_types(index)
+
+    off_rows: list[OffListRow] = []
+    # Per-chapter token split. Names are tracked apart from other off-list
+    # vocabulary because a list may have no entry for them — a classical
+    # frequency list has none at all — and charging a text for those measures it
+    # against a target that does not exist. Only *unmatched* names land here:
+    # `gnt-lemmas` contains hundreds, and those match like any other word.
+    on_list_tokens: Counter = Counter()
+    off_list_tokens: Counter = Counter()
+    proper_tokens: Counter = Counter()
+
+    # First-encounter vocabulary, keyed by the chapter that introduces it. A
+    # lemma lands in exactly one of these, so summing them over the text gives
+    # the corpus's distinct-lemma count and the four chart segments partition.
+    new_types: dict[bool, Counter] = {True: Counter(), False: Counter()}
+    new_tokens: dict[bool, Counter] = {True: Counter(), False: Counter()}
+
+    exact = alias = folded = ambiguous = 0
+    matched_lemmas = 0
+    unmatched_lemmas = unmatched_tokens = 0
+    proper_lemmas = proper_token_total = 0
+    text_lemmas = 0
+
+    for lemma, track in index.iter_lemmas():
+        text_lemmas += 1
+        match = lexicon.lookup(lemma)
+
+        if match is None:
+            proper = lexicon_mod.is_proper_noun(lemma)
+            bucket = proper_tokens if proper else off_list_tokens
+            for chapter_index in track.chapters:
+                bucket[chapter_index] += track.count_in(chapter_index)
+            if proper:
+                proper_lemmas += 1
+                proper_token_total += track.total
+            else:
+                unmatched_lemmas += 1
+                unmatched_tokens += track.total
+            first = track.first_chapter
+            if first is not None:
+                new_types[False][first] += 1
+                new_tokens[False][first] += track.count_in(first)
+            off_rows.append(
+                OffListRow(
+                    lemma=lemma,
+                    type=types.get(lemma, ""),
+                    occ=track.total,
+                    first_chapter=track.first_chapter or 0,
+                    chapter_count=track.chapter_count,
+                    proper=proper,
+                )
+            )
+            continue
+
+        matched_lemmas += 1
+        if match.how == lexicon_mod.EXACT:
+            exact += 1
+        elif match.how == lexicon_mod.ALIAS:
+            alias += 1
+        else:
+            folded += 1
+        if match.ambiguous:
+            ambiguous += 1
+
+        for chapter_index in track.chapters:
+            on_list_tokens[chapter_index] += track.count_in(chapter_index)
+        first = track.first_chapter
+        if first is not None:
+            new_types[True][first] += 1
+            new_tokens[True][first] += track.count_in(first)
+        for entry in match.entries:
+            accums.setdefault(entry.rank, _EntryAccum()).add(lemma, track, match.how, match.ambiguous)
+
+    entries = [_lexicon_entry_row(entry, accums.get(entry.rank), lexicon) for entry in lexicon.entries]
+    covered_ranks = set(accums)
+
+    gap_rows = [
+        LexiconGapRow(
+            rank=entry.rank,
+            lemma=entry.lemma,
+            gloss=entry.gloss,
+            kind=entry.kind,
+            ref_share=lexicon.ref_share(entry),
+        )
+        for entry in lexicon.entries
+        if entry.rank not in covered_ranks
+    ]
+
+    return LexiconReport(
+        lexicon=_lexicon_ref(lexicon),
+        summary=_lexicon_summary(index, lexicon, covered_ranks, on_list_tokens, off_list_tokens, proper_tokens),
+        bands=_lexicon_bands(lexicon, covered_ranks),
+        progress=_lexicon_progress(
+            index, lexicon, accums, on_list_tokens, off_list_tokens, proper_tokens, new_types, new_tokens
+        ),
+        entries=entries,
+        gaps=gap_rows[:gap_limit],
+        gaps_total=len(gap_rows),
+        off_list=sorted(off_rows, key=lambda r: (-r.occ, r.lemma))[:off_list_limit],
+        off_list_total=len(off_rows),
+        match=LexiconMatchReport(
+            text_lemmas=text_lemmas,
+            matched_lemmas=matched_lemmas,
+            exact=exact,
+            alias=alias,
+            folded=folded,
+            ambiguous=ambiguous,
+            unmatched_lemmas=unmatched_lemmas,
+            unmatched_tokens=unmatched_tokens,
+            proper_lemmas=proper_lemmas,
+            proper_tokens=proper_token_total,
+            tokens=index.total_tokens,
+            tokens_on_list=sum(on_list_tokens.values()),
+        ),
+        chapter_refs=build_chapter_refs(index),
+    )
+
+
+def _dominant_types(index: CorpusIndex) -> dict[str, str]:
+    """The part of speech the provider most often gave each lemma.
+
+    One pass for the whole corpus rather than a scan per lemma. The obvious
+    spelling — filter `iter_facts()` inside the lemma loop — is quadratic, and
+    on a 2,000-lemma / 14,000-token run that is 28 million comparisons to
+    produce a column.
+
+    Off-list rows carry it because "which words is this text spending its
+    vocabulary budget on" reads very differently for a name, a particle and a
+    noun, and the lemma alone does not say.
+    """
+    counts: dict[str, Counter] = defaultdict(Counter)
+    for fact in index.iter_facts():
+        counts[fact.lemma][fact.type] += 1
+    return {lemma: c.most_common(1)[0][0] for lemma, c in counts.items()}
+
+
+def _lexicon_ref(lexicon: Lexicon) -> LexiconRef:
+    meta = lexicon.meta
+    return LexiconRef(
+        id=meta.id,
+        name=meta.name,
+        short_name=meta.short_name,
+        description=meta.description,
+        entry_count=meta.entry_count,
+        reference_tokens=meta.reference_tokens,
+        source=meta.source,
+    )
+
+
+def _lexicon_entry_row(entry, accum: _EntryAccum | None, lexicon: Lexicon) -> LexiconEntryRow:
+    return LexiconEntryRow(
+        rank=entry.rank,
+        lemma=entry.lemma,
+        gloss=entry.gloss,
+        kind=entry.kind,
+        ref_count=entry.ref_count,
+        ref_share=lexicon.ref_share(entry),
+        occ=accum.occ if accum else 0,
+        first_chapter=accum.first_chapter if accum else None,
+        chapter_count=len(accum.chapters) if accum else 0,
+        chapters=(
+            [
+                LexiconChapterOcc(chapter_index=ci, occ=occ)
+                for ci, occ in sorted(accum.chapters.items())
+            ]
+            if accum
+            else []
+        ),
+        matched_by=accum.matched_by if accum else "",
+        ambiguous=accum.ambiguous if accum else False,
+        source_lemma=accum.source_lemma if accum else "",
+    )
+
+
+def _lexicon_summary(
+    index: CorpusIndex,
+    lexicon: Lexicon,
+    covered_ranks: set[int],
+    on_list: Counter,
+    off_list: Counter,
+    proper: Counter,
+) -> LexiconSummary:
+    covered_share_of_ref = sum(
+        lexicon.ref_share(entry) for entry in lexicon.entries if entry.rank in covered_ranks
+    )
+    tokens = index.total_tokens
+    on = sum(on_list.values())
+    return LexiconSummary(
+        entries=len(lexicon),
+        covered=len(covered_ranks),
+        covered_share=len(covered_ranks) / len(lexicon) if len(lexicon) else 0.0,
+        ref_share_covered=covered_share_of_ref,
+        ref_share_total=lexicon.total_ref_share,
+        tokens=tokens,
+        tokens_on_list=on,
+        tokens_off_list=sum(off_list.values()),
+        tokens_proper=sum(proper.values()),
+        on_list_share=on / tokens if tokens else 0.0,
+        chapter_count=index.chapter_count,
+    )
+
+
+def _lexicon_bands(lexicon: Lexicon, covered_ranks: set[int]) -> list[LexiconBand]:
+    """The list sliced into rank bands, each with what the text has claimed of it.
+
+    The bands span the list's *ranks*, not its entry count, and each one is
+    filled by scanning the entries — so a list whose ranks are sparse (any row
+    `_read_entries` skipped leaves a hole) or that stops short of a round number
+    still bands correctly, and every entry lands in exactly one band. Walking to
+    `len(lexicon)` instead would silently drop every entry ranked beyond the
+    count, and the bands would no longer sum to `summary.covered`.
+
+    Empty bands are dropped rather than shown at zero: a hole in the ranks is an
+    artefact of the source file, not a stratum of the language the text failed.
+    """
+    bands: list[LexiconBand] = []
+    last_rank = max((e.rank for e in lexicon.entries), default=0)
+    for start in range(1, last_rank + 1, LEXICON_BAND_SIZE):
+        end = min(start + LEXICON_BAND_SIZE - 1, last_rank)
+        slice_ = [e for e in lexicon.entries if start <= e.rank <= end]
+        if not slice_:
+            continue
+        bands.append(
+            LexiconBand(
+                start=start,
+                end=end,
+                entries=len(slice_),
+                covered=sum(1 for e in slice_ if e.rank in covered_ranks),
+                ref_share=sum(lexicon.ref_share(e) for e in slice_),
+                ref_share_covered=sum(
+                    lexicon.ref_share(e) for e in slice_ if e.rank in covered_ranks
+                ),
+            )
+        )
+    return bands
+
+
+def _lexicon_progress(
+    index: CorpusIndex,
+    lexicon: Lexicon,
+    accums: dict[int, _EntryAccum],
+    on_list: Counter,
+    off_list: Counter,
+    proper: Counter,
+    new_types: dict[bool, Counter],
+    new_tokens: dict[bool, Counter],
+) -> list[LexiconChapterProgress]:
+    """The curve the tab leads with: goal vocabulary delivered, chapter by chapter.
+
+    An entry counts as taught in the chapter that first uses it and never again,
+    so ``new_entries`` summed over the text equals ``summary.covered`` exactly.
+    ``cumulative_ref_share`` is the same series weighted by how common each word
+    is, which is the one that answers "how much Greek can a reader handle by the
+    end of chapter N".
+
+    Every chapter gets a point, including one that taught nothing new. A flat
+    stretch in the curve is the finding, and dropping the chapters that caused
+    it would hide exactly what an author is looking for.
+    """
+    ref_share_by_rank = {e.rank: lexicon.ref_share(e) for e in lexicon.entries}
+
+    new_counts: Counter = Counter()
+    new_shares: dict[int, float] = defaultdict(float)
+    for rank, accum in accums.items():
+        first = accum.first_chapter
+        if first is None:
+            continue
+        new_counts[first] += 1
+        new_shares[first] += ref_share_by_rank.get(rank, 0.0)
+
+    points: list[LexiconChapterProgress] = []
+    running_entries = 0
+    running_share = 0.0
+    for chapter_index in index.chapter_indexes:
+        running_entries += new_counts.get(chapter_index, 0)
+        running_share += new_shares.get(chapter_index, 0.0)
+        on = on_list.get(chapter_index, 0)
+        off = off_list.get(chapter_index, 0)
+        names = proper.get(chapter_index, 0)
+        points.append(
+            LexiconChapterProgress(
+                chapter_index=chapter_index,
+                new_entries=new_counts.get(chapter_index, 0),
+                cumulative_entries=running_entries,
+                new_ref_share=new_shares.get(chapter_index, 0.0),
+                cumulative_ref_share=running_share,
+                tokens=on + off + names,
+                tokens_on_list=on,
+                tokens_off_list=off,
+                tokens_proper=names,
+                new_on_list_types=new_types[True].get(chapter_index, 0),
+                new_off_list_types=new_types[False].get(chapter_index, 0),
+                new_on_list_tokens=new_tokens[True].get(chapter_index, 0),
+                new_off_list_tokens=new_tokens[False].get(chapter_index, 0),
+                tokens_off_list_with_names=off + names,
+            )
+        )
+    return points

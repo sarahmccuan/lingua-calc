@@ -735,6 +735,26 @@ th.sortable.sort-desc::after {
   --series-3-ink: #111111;
   --series-4: #71717a;
   --series-4-ink: #ffffff;
+
+  /* Washed-out twins of series 1 and 2, for a chart encoding two binary
+     dimensions at once: the lexicon growth bars use hue for new vs already-met
+     and saturation for on-list vs off-list, which is one channel per question
+     instead of four unrelated colours.
+
+     They deliberately *recede* — toward the page here, toward the ground in the
+     dark block below. That is the meaning, not just the styling: off-list
+     vocabulary is load a reader carries without progressing toward the goal, so
+     it should read as the quieter thing in the bar rather than competing with
+     the vocabulary that counts.
+
+     Receding costs contrast, so the stacking order is what keeps it safe. The
+     muted orange is always *interior* — list-already-met below it, list-new
+     above — so both its edges meet a saturated block and it never has to hold
+     its own against the page. Only the muted blue sits on top of the stack, and
+     it keeps the most contrast of the two for exactly that reason. Reorder
+     `GROWTH_SEGMENTS` and this stops being true. */
+  --series-1-muted: #86a6cc;
+  --series-2-muted: #dba995;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -749,6 +769,13 @@ th.sortable.sort-desc::after {
     --series-3-ink: #111111;
     --series-4: #a1a1aa;
     --series-4-ink: #111111;
+
+    /* Dimmer, not lighter. "Recedes" means toward the background, and on
+       #18181b that is downwards — the same direction `--muted` moves from
+       `--fg`. A lighter tint here would make off-list the loudest thing on the
+       chart, which is the opposite of what it means. */
+    --series-1-muted: #376295;
+    --series-2-muted: #824b35;
   }
 }
 
@@ -766,6 +793,14 @@ th.sortable.sort-desc::after {
 
 .series-4 {
   fill: var(--series-4);
+}
+
+.series-1-muted {
+  fill: var(--series-1-muted);
+}
+
+.series-2-muted {
+  fill: var(--series-2-muted);
 }
 
 .ink-1 {
@@ -859,6 +894,14 @@ th.sortable.sort-desc::after {
 
 .chart-swatch.series-4 {
   color: var(--series-4);
+}
+
+.chart-swatch.series-1-muted {
+  color: var(--series-1-muted);
+}
+
+.chart-swatch.series-2-muted {
+  color: var(--series-2-muted);
 }
 
 .chart-controls {
@@ -1380,5 +1423,199 @@ th.num {
   font-size: 0.75rem;
   text-align: right;
   overflow: hidden;
+  white-space: nowrap;
+}
+
+
+/* -- lexicon lens ----------------------------------------------------------
+   The list is the goal and the text is what is measured, so this tab reads
+   top-down as an answer: how much of the goal is met, where that coverage
+   sits, then the list itself row by row. The two bars in a row are a
+   deliberate pair — how many entries a block contains, and what that block is
+   actually worth — because the first without the second makes the top 500 look
+   like a tenth of the job when it is four fifths of it. */
+
+.lex-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 0.6rem;
+  margin-bottom: 0.9rem;
+  font-size: 0.8125rem;
+}
+
+.lex-picker,
+.lex-scope {
+  font: inherit;
+  padding: 0.25rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--fg);
+  max-width: 22rem;
+}
+
+.lex-picker:disabled {
+  /* One installed list is not a choice. It still reads as the thing being
+     benchmarked against, so it keeps full contrast rather than greying out. */
+  opacity: 1;
+  cursor: default;
+}
+
+.lex-headline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem 2rem;
+  margin-bottom: 0.4rem;
+}
+
+.lex-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.lex-stat-value {
+  font-size: 1.5rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.15;
+}
+
+.lex-stat-label {
+  font-size: 0.8125rem;
+}
+
+/* -- band bars ------------------------------------------------------------- */
+
+.lex-bands {
+  list-style: none;
+  margin: 0.75rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.lex-bands li {
+  display: grid;
+  grid-template-columns: 5.5rem 1fr auto;
+  align-items: center;
+  gap: 0.75rem;
+  font-size: 0.8125rem;
+}
+
+.lex-band-label {
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.lex-band-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.lex-band-track {
+  display: block;
+  height: 0.55rem;
+  border-radius: 2px;
+  background: var(--row-alt);
+  overflow: hidden;
+}
+
+.lex-band-fill {
+  display: block;
+  height: 100%;
+  /* These are HTML elements, not SVG, so the series variables have to be
+     applied as `background` — the `.series-N` rules set `fill`, which does
+     nothing here. */
+  border-radius: 2px;
+}
+
+.lex-band-fill.series-1 {
+  background: var(--series-1);
+}
+
+.lex-band-note {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* -- the list table -------------------------------------------------------- */
+
+.lex-views {
+  margin: 1.25rem 0 0.5rem;
+}
+
+.lex-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+  font-size: 0.8125rem;
+}
+
+.lex-caption {
+  font-size: 0.8125rem;
+  margin: 0 0 0.5rem;
+  max-width: 62ch;
+}
+
+.lex-gloss {
+  color: var(--muted);
+  max-width: 28rem;
+}
+
+/* Number and bar share one cell so the bar is read as that number rather than
+   as a column of its own that has to be lined up against it. */
+.lex-occ-cell {
+  white-space: nowrap;
+}
+
+.lex-occ {
+  display: inline-block;
+  min-width: 3.5ch;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.lex-bar {
+  display: inline-block;
+  width: 5rem;
+  height: 0.5rem;
+  margin-left: 0.5rem;
+  vertical-align: middle;
+  background: var(--row-alt);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.lex-bar-fill {
+  display: block;
+  height: 100%;
+  background: var(--series-1);
+  border-radius: 2px;
+}
+
+/* A row for a word the text has not used. Dimmed rather than hidden, and only
+   the lemma keeps full contrast: the unmet rows are half the point of the
+   table, so they have to stay legible while reading as the negative space they
+   are. */
+tr.lex-unmet td {
+  color: var(--muted);
+}
+
+tr.lex-unmet td.greek {
+  color: var(--fg);
+}
+
+/* The `match` column is a caveat, not a measurement: it only ever has text when
+   a row's coverage rests on a judgment call, so it wears the muted ink the rest
+   of the qualifying copy on this tab does. */
+td.lex-match {
+  color: var(--muted);
+  font-size: 0.8125rem;
   white-space: nowrap;
 }
