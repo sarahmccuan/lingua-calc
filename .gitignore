@@ -10,5 +10,12 @@ build/
 .env
 .DS_Store
 logs/
-data/
+# The run store and its scratch live here and are machine-local; the reference
+# lexicons beside them are versioned source, so `data/*` (not `data/`) — git
+# cannot re-include a path whose parent directory is itself excluded.
+data/*
+!data/lexicons/
+# Third-party corpora cloned only to regenerate a lexicon CSV (see
+# data/lexicons/manifest.json). ~97MB, not a runtime dependency.
+vendor/
 .claude/settings.local.json

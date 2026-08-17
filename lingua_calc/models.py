@@ -546,3 +546,247 @@ class MultiFileReport(BaseModel):
 class AnalyzeError(BaseModel):
     error: str
     detail: str | None = None
+
+
+# -- lexicon lens -----------------------------------------------------------
+#
+# The fourth lens turns the question around. The other three ask what a text
+# contains; this one fixes a ranked vocabulary list as the goal and asks how
+# much of it the text has taught, chapter by chapter. The text is the variable
+# and the list is the constant, which is why every headline figure below has the
+# list in its denominator.
+#
+# Like the lemma lens this is fetched per request rather than shipped with the
+# report: it is a join against reference data the report knows nothing about,
+# and a 5000-row table has no business riding along with runs nobody will open
+# it for.
+
+
+class LexiconRef(BaseModel):
+    """One lexicon, as the picker needs it — no entries, so listing is cheap."""
+
+    id: str
+    name: str
+    short_name: str
+    description: str = ""
+    entry_count: int
+    reference_tokens: int = Field(
+        description="Size of the corpus the list's frequencies were counted on — the denominator behind every share"
+    )
+    source: str = ""
+
+
+class LexiconChapterOcc(BaseModel):
+    """One chapter's occurrences of one entry. Sparse: chapters with none are absent.
+
+    Nested inside the entry rather than shipped as a parallel table because a
+    covered entry appears in a handful of chapters out of sixty, so the sparse
+    form is an order of magnitude smaller than the dense one and needs no join.
+    """
+
+    chapter_index: int
+    occ: int
+
+
+class LexiconEntryRow(BaseModel):
+    """One list entry and what the text has done with it.
+
+    ``occ == 0`` is the interesting case as often as not: it is a word the goal
+    list says matters that the text has not yet used, and the rows are ordered by
+    rank so the untaught ones surface exactly where their frequency puts them.
+    """
+
+    rank: int
+    lemma: str
+    gloss: str = ""
+    kind: str = Field(default="", description="L lexical / F function, as the list classifies it; may be blank")
+    ref_count: int
+    ref_share: float = Field(description="This entry's share of the reference corpus, as a fraction")
+
+    occ: int = Field(default=0, description="Occurrences in the text, whole-corpus")
+    first_chapter: int | None = Field(default=None, description="Where the text first teaches it; None if never")
+    chapter_count: int = 0
+    chapters: list[LexiconChapterOcc] = Field(default_factory=list)
+
+    matched_by: str = Field(
+        default="",
+        description="How the text lemma reached this entry: exact, alias, folded — blank if untaught",
+    )
+    ambiguous: bool = Field(
+        default=False,
+        description="Credited via a homograph key the provider cannot disambiguate",
+    )
+    source_lemma: str = Field(
+        default="",
+        description=(
+            "The text lemma that reached this entry, commonest first where several did. "
+            "Blank if untaught. Differs from `lemma` wherever the match rested on a "
+            "homograph digit, an alias or a fold, which is why the UI links this and not the headword"
+        ),
+    )
+
+
+class LexiconBand(BaseModel):
+    """A slice of the list by rank — 1-500, 501-1000, and so on.
+
+    The shape of the progress, not just its size. A text covering 300 entries
+    spread evenly through 5000 and one covering the first 300 are the same
+    number and completely different pedagogy, and only the banding tells them
+    apart.
+    """
+
+    start: int
+    end: int
+    entries: int
+    covered: int
+    ref_share: float = Field(description="What this band is worth in the reference corpus")
+    ref_share_covered: float = Field(description="How much of that the text has claimed")
+
+
+class LexiconChapterProgress(BaseModel):
+    """One chapter's contribution to the goal.
+
+    ``new_entries`` is the teaching rate — entries this chapter is the first to
+    use. ``cumulative_entries`` is the total a reader has met by the end of it,
+    which is the curve the tab leads with.
+
+    The token split says what the chapter spent its words on: vocabulary on the
+    list, vocabulary off it, and names. Names are their own bucket because a
+    list may well have no entry for them — a classical frequency list has none
+    at all — and counting those as off-list charges a text for words it could
+    never have got credit for. A name the list *does* contain (``gnt-lemmas``
+    has hundreds) matches like any other word and never reaches this bucket.
+    """
+
+    chapter_index: int
+    new_entries: int
+    cumulative_entries: int
+    new_ref_share: float
+    cumulative_ref_share: float
+    tokens: int
+    tokens_on_list: int
+    tokens_off_list: int
+    tokens_proper: int
+
+    # The chapter's own vocabulary, split by whether it serves the goal and by
+    # whether the reader is meeting it for the first time. Counted in the
+    # *text's* words rather than in list entries, because only then do the four
+    # numbers partition the chapter exactly — an entry can be reached by two
+    # spellings and a spelling can credit two entries, so entries do not.
+    #
+    # "Off-list" here **includes proper nouns**, unlike `tokens_off_list` above.
+    # The chart folds them in; the headline and the match report keep them
+    # apart. Both readings are wanted, so both are carried rather than one being
+    # re-derived and getting it subtly wrong.
+    new_on_list_types: int = Field(default=0, description="On-list lemmas whose first appearance anywhere is here")
+    new_off_list_types: int = Field(default=0, description="Unmatched lemmas, names included, first appearing here")
+    new_on_list_tokens: int = Field(default=0, description="Occurrences here of the on-list lemmas new to this chapter")
+    new_off_list_tokens: int = Field(default=0, description="Occurrences here of the off-list lemmas new to this chapter")
+    tokens_off_list_with_names: int = Field(
+        default=0, description="tokens_off_list + tokens_proper — the chart's off-list total"
+    )
+
+
+class LexiconGapRow(BaseModel):
+    """A high-value entry the text has not taught yet.
+
+    Ordered by rank, so this reads as a worklist: the commonest words in the
+    language that this text still gives a reader no exposure to.
+    """
+
+    rank: int
+    lemma: str
+    gloss: str = ""
+    kind: str = ""
+    ref_share: float
+
+
+class OffListRow(BaseModel):
+    """A word the text teaches that the list does not ask for.
+
+    Not a criticism — a text needs names, and a real author needs words outside
+    any core list. It is here because vocabulary load spent off-list is load a
+    reader carries without progressing toward the goal, and an author deciding
+    whether that trade is worth it needs to see which words they are.
+    """
+
+    lemma: str
+    type: str = ""
+    occ: int
+    first_chapter: int
+    chapter_count: int
+    proper: bool = Field(
+        default=False,
+        description="Looks like a name, and this list has no entry for it — so it is set aside rather than counted against the text",
+    )
+
+
+class LexiconMatchReport(BaseModel):
+    """How much of the text the matcher could actually place.
+
+    Shipped beside every figure in this lens for the same reason
+    ``CoverageReport`` rides along with the grammar counts: a lemma the matcher
+    failed to place is indistinguishable from a word genuinely off the list, and
+    "this text covers 26% of the 5000" is only trustworthy to the extent that
+    ``unmatched_tokens`` is small.
+    """
+
+    text_lemmas: int = Field(description="Distinct lemmas in the text")
+    matched_lemmas: int
+    exact: int
+    alias: int = Field(description="Placed via the curated alias file — judgment, not identity")
+    folded: int = Field(description="Placed via a dialect fold such as -ττ-/-σσ-")
+    ambiguous: int = Field(description="Placed on a key that names more than one entry")
+
+    unmatched_lemmas: int
+    unmatched_tokens: int
+    proper_lemmas: int = Field(description="Unmatched but capitalised, so excluded from the off-list count")
+    proper_tokens: int
+
+    tokens: int
+    tokens_on_list: int
+
+
+class LexiconSummary(BaseModel):
+    """The headline: what fraction of the goal this text has delivered.
+
+    Two numbers, because they answer different questions and a text can be
+    strong on one and weak on the other. ``covered`` is how many words of the
+    list a reader meets — the size of the vocabulary the text builds.
+    ``ref_share_covered`` weights each of those by how common it actually is, so
+    it reads as "a reader who learns everything this text teaches can then
+    recognise this share of running Greek". A text teaching 300 of the top 500
+    beats one teaching 600 scattered rarities on the second measure and loses on
+    the first.
+    """
+
+    entries: int
+    covered: int
+    covered_share: float
+
+    ref_share_covered: float
+    ref_share_total: float = Field(description="What the whole list is worth — the ceiling for the figure above")
+
+    tokens: int
+    tokens_on_list: int
+    tokens_off_list: int
+    tokens_proper: int
+    on_list_share: float = Field(description="Share of the text's tokens that are list vocabulary")
+
+    chapter_count: int
+
+
+class LexiconReport(BaseModel):
+    """The lexicon lens over one run, against one list."""
+
+    lexicon: LexiconRef
+    summary: LexiconSummary
+    bands: list[LexiconBand] = Field(default_factory=list)
+    progress: list[LexiconChapterProgress] = Field(default_factory=list)
+    entries: list[LexiconEntryRow] = Field(default_factory=list)
+    gaps: list[LexiconGapRow] = Field(default_factory=list)
+    gaps_total: int = Field(default=0, description="Entries the text never uses; `gaps` is the head of them")
+    off_list: list[OffListRow] = Field(default_factory=list)
+    off_list_total: int = Field(default=0, description="Distinct off-list lemmas; `off_list` is the head of them")
+    match: LexiconMatchReport
+    chapter_refs: list[ChapterRefOut] = Field(default_factory=list)

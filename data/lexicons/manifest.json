@@ -1,0 +1,46 @@
+{
+  "$comment": [
+    "Registry of reference lexicons the Lexicon lens can benchmark a text against.",
+    "Adding one is: drop a CSV beside this file and add an entry here. Nothing in",
+    "the package hard-codes a lexicon id, and the UI dropdown is built from this list.",
+    "",
+    "entries_file columns: rank, lemma, gloss, kind (L/F/blank), ref_count, ref_coverage",
+    "  rank          1-based, dense, ascending by reference-corpus frequency",
+    "  lemma         NFC, accented, lowercase; a trailing digit marks a homograph",
+    "  ref_count     occurrences in the reference corpus",
+    "  ref_coverage  cumulative % of the reference corpus covered through this rank",
+    "aliases_file columns: variant, lemma, kind, note — see lexicon.py for how these",
+    "  are applied. Growing this file is the intended way to fix a match failure."
+  ],
+  "lexicons": [
+    {
+      "id": "greek-core-5k",
+      "name": "Core Greek 5000",
+      "short_name": "Core 5k",
+      "description": "The 5000 most frequent lemmas in a ~469k-token classical and Koine reference corpus, ranked by frequency.",
+      "entries_file": "greek-core-5k.csv",
+      "aliases_file": "greek-core-5k.aliases.csv",
+      "reference_tokens": 468836,
+      "source": "https://docs.google.com/spreadsheets/d/1ke7JuFd5iy7bPSCHutgRYFvjDbcSScABld4zwEvDb-s/edit?gid=0#gid=0",
+      "default": true
+    },
+    {
+      "id": "gnt-lemmas",
+      "name": "Greek New Testament",
+      "short_name": "GNT",
+      "description": "Every lemma in the Greek New Testament, 5,461 of them, ranked by frequency across 137,554 lemma tokens. Unlike the Core 5000 this list includes proper nouns.",
+      "entries_file": "gnt-lemmas.csv",
+      "aliases_file": "gnt-lemmas.aliases.csv",
+      "reference_tokens": 137554,
+      "source": "https://github.com/jtauber/vocabulary-tools (gnt_data, MorphGNT lemmatisation)",
+      "notes": [
+        "Generated from jtauber/vocabulary-tools: Counter(get_tokens(TokenType.lemma)).",
+        "kind is folded from MorphGNT part-of-speech codes: N-/V-/A-/D-/I- lexical, RA/C-/P-/RP/RD/RR/RI/X- function.",
+        "Glosses are BORROWED from greek-core-5k where the two lists name the same word (51% of entries);",
+        "the GNT data carries no definitions of its own, and the rest are blank rather than invented.",
+        "MorphGNT cites movable consonants in parentheses (`ουτω(ς)`); the entry takes the fuller",
+        "spelling and the bare one is an alias, since the parenthesised form matches no real text."
+      ]
+    }
+  ]
+}

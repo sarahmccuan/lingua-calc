@@ -95,7 +95,19 @@ function buildTable(columns, rows, { className = "", rowClass = null } = {}) {
         const classes = [col.cls, alignOf(col) === "num" ? "num" : null].filter(Boolean).join(" ");
         const title = col.cellTitle ? ` title="${escapeHtml(col.cellTitle(row))}"` : "";
         const text = escapeHtml(cellText(col, row));
-        const body = col.link ? `<button type="button" class="cell-link">${text}</button>` : text;
+        // `html` is the one escape hatch, and it is the column's job to be safe:
+        // it exists so a cell can carry a bar beside its number rather than a
+        // number alone. Everything it interpolates must already be escaped or,
+        // as with the bar width, be a number this file computed.
+        // `linkable` is per row, `link` is per column: a lemma column can only
+        // jump to a word the lemma lens actually holds, and a list entry the
+        // text never used is not one. Rendering the button anyway gives a cell
+        // that looks clickable and lands on "no such lemma".
+        const body = col.html
+          ? col.html(row)
+          : col.link && (!col.linkable || col.linkable(row))
+            ? `<button type="button" class="cell-link">${text}</button>`
+            : text;
         cells.push(`<td${classes ? ` class="${classes}"` : ""}${title}>${body}</td>`);
       }
       tr.innerHTML = cells.join("");
@@ -2150,6 +2162,948 @@ function renderLemmaPanel(data, ctx) {
   return panel;
 }
 
+// -- lexicon lens -----------------------------------------------------------
+//
+// The other three lenses read the text and report what is in it. This one fixes
+// a ranked vocabulary list as the goal and asks how much of it the text has
+// met — so every headline figure has the *list* in its denominator, and a
+// row with no occurrences is as interesting as one with many.
+//
+// The headline is deliberately spare: how many words of the list a reader meets,
+// and how much of the text is list vocabulary at all.
+//
+// It briefly carried a third figure — the covered entries weighted by how common
+// each word is in the reference corpus. That number does real work (it separates
+// a text covering the top 300 words from one covering 300 rarities) but it could
+// not be labelled honestly in the space a stat tile has. It is not "Greek", it is
+// whichever corpus the list came from; it sounds like comprehension when reading
+// needs ~95% coverage and this sits near 50%; and its scale is so front-loaded
+// that `ὁ` alone is worth 11% and any text using the article and καί starts near
+// 30%. `LexiconSummary.ref_share_covered` still carries it for whatever presents
+// it properly — the band chart is the better argument for now.
+//
+// Unlike the chapter and text tabs, this one is fetched rather than read off the
+// report payload: it is a join against reference data the report knows nothing
+// about, so it needs a stored run behind it, the same constraint the lemma lens
+// has.
+
+// Scope is cumulative on purpose. "Through chapter 8" is the question an author
+// writing chapter 9 is asking — what has a reader met by now — and a
+// chapter-only view answers a question ("what is in this one chapter") the
+// chapter tab already owns. The per-chapter count still rides along as its own
+// column when a chapter is selected.
+const LEXICON_SCOPE_ALL = -1;
+
+// Bars are square-rooted, not linear. The article accounts for 2,715 of the
+// 4,213 tokens in the stored run, and against a linear scale every other row in
+// the table is a bar one pixel wide — which is true and useless. The root keeps
+// the ordering exact while leaving the middle of the distribution readable.
+function lexiconBar(occ, max) {
+  if (!occ) return "";
+  const width = max > 0 ? Math.max(2, Math.round(100 * Math.sqrt(occ / max))) : 0;
+  return `<span class="lex-bar"><span class="lex-bar-fill" style="width:${width}%"></span></span>`;
+}
+
+// One entry's occurrences within the selected scope, and within the selected
+// chapter alone. `chapters` is sparse — chapters with none are absent — so both
+// are a walk over the few entries that exist rather than an index into a dense
+// row.
+function entryInScope(entry, scope) {
+  if (scope === LEXICON_SCOPE_ALL) {
+    return { through: entry.occ, here: 0, first: entry.first_chapter, chapters: entry.chapter_count };
+  }
+  let through = 0;
+  let here = 0;
+  let first = null;
+  let chapters = 0;
+  for (const c of entry.chapters) {
+    if (c.chapter_index > scope) continue;
+    through += c.occ;
+    chapters += 1;
+    if (c.chapter_index === scope) here = c.occ;
+    if (first === null) first = c.chapter_index;
+  }
+  return { through, here, first, chapters };
+}
+
+// Everything the panel shows for one scope, recomputed on the client. The
+// server ships the whole list with per-chapter counts precisely so that moving
+// the scope is arithmetic rather than a round trip — switching chapters on a
+// 60-chapter text would otherwise be 60 fetches of a megabyte each.
+function lexiconScopeView(report, scope) {
+  const rows = [];
+  let covered = 0;
+  let maxOcc = 0;
+
+  for (const entry of report.entries) {
+    const inScope = entryInScope(entry, scope);
+    if (inScope.through > 0) {
+      covered += 1;
+      if (inScope.through > maxOcc) maxOcc = inScope.through;
+    }
+    rows.push({
+      ...entry,
+      scope_occ: inScope.through,
+      scope_here: inScope.here,
+      scope_first: inScope.first,
+      scope_chapters: inScope.chapters,
+    });
+  }
+
+  // Bands are re-derived rather than read off `report.bands`, which is
+  // whole-text only. Re-deriving keeps one definition of a band in play; the
+  // alternative is a scoped table that silently disagrees with the chart above it.
+  const bands = report.bands.map((band) => {
+    const slice = rows.filter((r) => r.rank >= band.start && r.rank <= band.end);
+    const hit = slice.filter((r) => r.scope_occ > 0);
+    return {
+      ...band,
+      covered: hit.length,
+      ref_share_covered: hit.reduce((n, r) => n + r.ref_share, 0),
+    };
+  });
+
+  const progress = report.progress.filter((p) => scope === LEXICON_SCOPE_ALL || p.chapter_index <= scope);
+  const tokens = progress.reduce((n, p) => n + p.tokens, 0);
+  const onList = progress.reduce((n, p) => n + p.tokens_on_list, 0);
+  const offList = progress.reduce((n, p) => n + p.tokens_off_list, 0);
+  const proper = progress.reduce((n, p) => n + p.tokens_proper, 0);
+
+  return {
+    rows,
+    bands,
+    covered,
+    maxOcc,
+    entries: report.entries.length,
+    tokens,
+    onList,
+    offList,
+    proper,
+    chapters: progress.length,
+  };
+}
+
+function lexiconStat(value, label, title) {
+  const el = document.createElement("div");
+  el.className = "lex-stat";
+  if (title) el.title = title;
+  el.innerHTML =
+    `<span class="lex-stat-value">${escapeHtml(value)}</span>` +
+    `<span class="lex-stat-label muted">${escapeHtml(label)}</span>`;
+  return el;
+}
+
+// What the headline is talking about, in words. The scope is cumulative — the
+// picker reads "through <chapter>" — so anything past the first chapter covers a
+// range and has to say so: "this chapter" would be a plain misreport of a figure
+// that includes everything before it. Only the opening chapter is both.
+function scopePhrase(report, scope, labels) {
+  if (scope === LEXICON_SCOPE_ALL) return { of: "this text", in: "the whole text" };
+  const first = report.progress.length ? report.progress[0].chapter_index : 0;
+  if (scope === first) {
+    const name = labels.short(scope);
+    return { of: "this chapter", in: `chapter ${name}` };
+  }
+  const range = `chapters ${labels.short(first)}–${labels.short(scope)}`;
+  return { of: range, in: range };
+}
+
+function lexiconHeadline(report, view, scope, labels) {
+  const el = document.createElement("div");
+  el.className = "lex-headline";
+
+  const where = scopePhrase(report, scope, labels);
+
+  el.append(
+    lexiconStat(
+      `${view.covered.toLocaleString()} / ${view.entries.toLocaleString()}`,
+      `list words met (${pct(share(view.covered, view.entries))})`,
+      `Entries of ${report.lexicon.name} used at least once in ${where.in}`
+    ),
+    lexiconStat(
+      pct(share(view.onList, view.tokens)),
+      `of ${where.of} is list vocabulary`,
+      `${view.onList.toLocaleString()} of ${view.tokens.toLocaleString()} tokens in ${where.in}`
+    )
+  );
+  return el;
+}
+
+// The honesty line. A coverage figure is only as good as the share of the text
+// the matcher could place, exactly as a grammar count is only as good as
+// `CoverageReport` — a lemma that failed to match is indistinguishable from a
+// word genuinely off the list, and both land outside the numerator.
+//
+// Whole-text whatever the scope is, and it says so when the headline above it
+// is not: the match report is aggregated per lemma rather than per chapter, so
+// there is nothing to scope it by. An unlabelled line simply disagreed with the
+// numbers directly above it.
+function lexiconMatchNote(match, scoped) {
+  const el = document.createElement("p");
+  el.className = "coverage-note muted";
+  const parts = [
+    `${scoped ? "Across the whole text: " : ""}` +
+      `${match.matched_lemmas.toLocaleString()} of ${match.text_lemmas.toLocaleString()} text lemmas placed ` +
+      `(${pct(share(match.tokens_on_list, match.tokens))} of tokens)`,
+  ];
+  if (match.alias || match.folded) {
+    parts.push(`${match.alias} via alias, ${match.folded} via a dialect fold`);
+  }
+  if (match.ambiguous) parts.push(`${match.ambiguous} on an ambiguous homograph key`);
+  if (match.proper_lemmas) {
+    parts.push(`${match.proper_lemmas} names set aside (${match.proper_tokens.toLocaleString()} tokens)`);
+  }
+  parts.push(`${match.unmatched_lemmas.toLocaleString()} off-list (${match.unmatched_tokens.toLocaleString()} tokens)`);
+  el.textContent = parts.join(" · ");
+  // The threshold is about trust, not correctness: below roughly four fifths
+  // placed, the gap between "not met" and "not matched" is wide enough that
+  // the headline should not be read without looking at the off-list table.
+  if (share(match.tokens_on_list, match.tokens) < 0.8) el.classList.add("warn");
+  return el;
+}
+
+const LEXICON_GROWTH_HEIGHT = 250;
+
+// The four segments of a growth bar, bottom to top.
+//
+// Two dimensions, two visual channels: **hue** says new versus already met
+// (blue / orange, as everywhere else in this app), **saturation** says on-list
+// versus off-list. Four unrelated colours would make the reader learn a legend;
+// this way each channel carries one question, and the muted pair reads as the
+// quieter version of the thing beside it.
+//
+// The stack groups by novelty rather than by list membership: everything the
+// reader already had sits at the base, and everything the chapter adds stacks on
+// top — the same grammar the text tab's progression chart uses, so the growing
+// edge of the bar is always what is new. The cost is that the two list segments
+// are no longer adjacent, so cumulative list vocabulary is no longer readable as
+// one edge; it is in the tooltip, and the band chart below answers the same
+// question standing still.
+const GROWTH_SEGMENTS = [
+  { key: "onRepeated", slot: "2", label: "list vocabulary, already met" },
+  { key: "offRepeated", slot: "2-muted", label: "off-list, already met" },
+  { key: "onNew", slot: "1", label: "list vocabulary, new" },
+  { key: "offNew", slot: "1-muted", label: "off-list, new" },
+];
+
+const GROWTH_UNITS = [
+  { key: "types", label: "words" },
+  { key: "tokens", label: "running text" },
+];
+
+// Cumulative, in whichever unit. Both are genuine cumulative totals, so the top
+// edge always means "everything the reader has met by the end of this chapter";
+// what differs is what is being counted.
+//
+//   types  — distinct lemmas. Each is counted once, in the chapter that
+//            introduces it, so the four segments sum to the corpus's lemma count.
+//   tokens — running words, every occurrence counted.
+//
+// **`new` cumulates for tokens and does not for types, and that asymmetry is
+// the correct one.** A lemma appears in the bar once, so splitting it into
+// "debuted here" and "debuted earlier" partitions the bar and both labels are
+// literally true. An occurrence appears in the bar once *per occurrence*, so the
+// same trick mislabels history: taking only the tokens a chapter is the first
+// to meet as `new` sweeps every earlier chapter's first meetings into
+// `already met`, and on the stored LGPSI run that put 1,078 tokens under a
+// label saying the reader already knew those words when in fact each was a
+// first meeting. Cumulating instead makes the split "read while the word was
+// new" versus "read once it was known", which is what the legend claims and
+// what the text tab's `new_tokens` means added up.
+//
+// Off-list **includes proper nouns** here. Everywhere else on this tab names are
+// their own bucket, because no list can contain them and charging a text for
+// them is unfair; in this chart they are folded in, so that the four segments
+// account for every word on the page and the bar total is the real one.
+function lexiconGrowthSeries(progress, unit) {
+  let onNew = 0;
+  let onAll = 0;
+  let offNew = 0;
+  let offAll = 0;
+
+  return progress.map((p) => {
+    if (unit === "types") {
+      onAll += p.new_on_list_types;
+      offAll += p.new_off_list_types;
+      onNew = p.new_on_list_types;
+      offNew = p.new_off_list_types;
+    } else {
+      onAll += p.tokens_on_list;
+      offAll += p.tokens_off_list_with_names;
+      onNew += p.new_on_list_tokens;
+      offNew += p.new_off_list_tokens;
+    }
+    return {
+      chapter_index: p.chapter_index,
+      point: p,
+      onNew,
+      onRepeated: onAll - onNew,
+      offNew,
+      offRepeated: offAll - offNew,
+      onAll,
+      offAll,
+      total: onAll + offAll,
+    };
+  });
+}
+
+function lexiconGrowthPlot(report, labels, unit, selected, onPick, available) {
+  const host = document.createElement("div");
+  host.className = "chart-plot";
+
+  const series = lexiconGrowthSeries(report.progress, unit);
+  const n = series.length;
+  const margin = { top: 10, right: 10, bottom: 34, left: 56 };
+  const slot = progressSlot(n, available - margin.left - margin.right);
+  const width = margin.left + margin.right + Math.max(n, 1) * slot;
+  const height = LEXICON_GROWTH_HEIGHT;
+  const baseline = height - margin.bottom;
+  const plotHeight = baseline - margin.top;
+
+  const scale = niceScale(Math.max(0, ...series.map((d) => d.total)));
+  const y = (value) => baseline - (value / scale.max) * plotHeight;
+
+  const noun = unit === "types" ? "distinct words" : "running words";
+  const root = svgEl("svg", {
+    width,
+    height,
+    viewBox: `0 0 ${width} ${height}`,
+    class: "chart-svg",
+    role: "img",
+    "aria-label": `Cumulative ${noun} met per chapter, split by whether they are in ${report.lexicon.name}`,
+  });
+
+  for (const tick of scale.ticks) {
+    const ty = y(tick);
+    root.appendChild(
+      svgEl("line", { x1: margin.left, x2: width - margin.right, y1: ty, y2: ty, class: "chart-grid" })
+    );
+    root.appendChild(
+      svgEl("text", { x: margin.left - 8, y: ty + 4, class: "chart-axis", "text-anchor": "end" }, tick.toLocaleString())
+    );
+  }
+
+  const labelEvery = Math.ceil(n / 24);
+  const tip = attachTip(host);
+  const barWidth = Math.max(6, Math.min(32, slot - 10, Math.round(slot * 0.45)));
+
+  series.forEach((d, i) => {
+    const slotX = margin.left + i * slot;
+    const x = slotX + (slot - barWidth) / 2;
+
+    // Walk the stack from the baseline up, skipping empty segments so a zero
+    // never eats a 2px gap. The radius belongs to the top of the whole bar, so
+    // only the last drawn segment gets it.
+    const present = GROWTH_SEGMENTS.filter((seg) => d[seg.key] > 0);
+    let cursor = 0;
+    let top = null;
+    present.forEach((seg, k) => {
+      const value = d[seg.key];
+      const bottom = y(cursor);
+      const segTop = y(cursor + value);
+      const last = k === present.length - 1;
+      // The gap is taken off the upper segment, so the stack keeps both its
+      // baseline and its top edge: it costs a pixel of ink, never of scale.
+      const gap = k > 0 ? 2 : 0;
+      top = svgEl("path", {
+        d: columnPath(x, segTop, barWidth, bottom - segTop - gap, last ? 4 : 0),
+        class: `series-${seg.slot}`,
+      });
+      root.appendChild(top);
+      cursor += value;
+    });
+
+    if (i % labelEvery === 0) {
+      root.appendChild(
+        svgEl(
+          "text",
+          { x: slotX + slot / 2, y: baseline + 20, class: "chart-axis", "text-anchor": "middle" },
+          labels.short(d.chapter_index)
+        )
+      );
+    }
+
+    const hit = svgEl("rect", {
+      x: slotX,
+      y: margin.top,
+      width: slot,
+      height: plotHeight,
+      class: "chart-hit" + (d.chapter_index === selected ? " selected" : ""),
+      tabindex: "0",
+      role: "button",
+      "aria-label":
+        `${labels.long(d.chapter_index)}: ${d.onAll.toLocaleString()} list and ` +
+        `${d.offAll.toLocaleString()} off-list ${noun} met so far`,
+    });
+    const anchor = top || hit;
+    const readout =
+      `<strong>${escapeHtml(labels.long(d.chapter_index))}</strong><br>` +
+      `by the end of it, ${d.total.toLocaleString()} ${noun} met<br>` +
+      // "new" rather than "new here": in the tokens view the figure cumulates,
+      // so it is every occurrence read while its word was still new, not just
+      // this chapter's. The legend uses the same bare word for the same reason.
+      `<b>list</b> ${d.onAll.toLocaleString()} — ${d.onNew.toLocaleString()} new, ${d.onRepeated.toLocaleString()} already met<br>` +
+      `<b>off-list</b> ${d.offAll.toLocaleString()} — ${d.offNew.toLocaleString()} new, ${d.offRepeated.toLocaleString()} already met<br>` +
+      // Counted in list *entries* rather than in the text's words, so it can
+      // differ from the list block above by a row or two — an entry reachable by
+      // two spellings, a spelling crediting two entries.
+      `<span class="muted">${d.point.cumulative_entries.toLocaleString()} of ` +
+      `${report.summary.entries.toLocaleString()} entries met</span>`;
+    hit.addEventListener("mouseenter", () => tip.show(readout, anchor));
+    hit.addEventListener("focus", () => tip.show(readout, anchor));
+    hit.addEventListener("mouseleave", () => tip.hide());
+    hit.addEventListener("blur", () => tip.hide());
+    hit.addEventListener("click", () => onPick(d.chapter_index));
+    hit.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        onPick(d.chapter_index);
+      }
+    });
+    root.appendChild(hit);
+  });
+
+  root.appendChild(
+    svgEl("line", { x1: margin.left, x2: width - margin.right, y1: baseline, y2: baseline, class: "chart-axis-line" })
+  );
+  host.appendChild(root);
+  return host;
+}
+
+// The shape of the progress, which the totals cannot show. A text covering 300
+// entries spread through the whole list and one covering the first 300 report
+// the same number and are completely different pedagogy; only the banding tells
+// them apart.
+//
+// One series on purpose. An earlier version drew a second bar per row for what
+// each block is *worth* in the reference corpus, which is real information but reads as
+// noise next to the bar it qualifies — two lengths per row, neither of which is
+// the one being scanned down. That weighting still has two homes where it can be
+// read deliberately rather than glanced at: the `corpus ref %` column in the table
+// below, and the headline share at the top of the tab.
+function lexiconBandChart(view) {
+  const { card } = chartCard(
+    "Where the coverage sits",
+    "The list in blocks of 500 by frequency rank, and how much of each block the reader meets."
+  );
+
+  const list = document.createElement("ul");
+  list.className = "lex-bands";
+  for (const band of view.bands) {
+    const li = document.createElement("li");
+    const coveredShare = share(band.covered, band.entries);
+    li.innerHTML =
+      `<span class="lex-band-label">${band.start.toLocaleString()}–${band.end.toLocaleString()}</span>` +
+      `<span class="lex-band-bars">` +
+      `<span class="lex-band-track" title="${band.covered} of ${band.entries} entries met">` +
+      `<span class="lex-band-fill series-1" style="width:${(coveredShare * 100).toFixed(1)}%"></span></span>` +
+      `</span>` +
+      `<span class="lex-band-note muted">${band.covered}/${band.entries} met</span>`;
+    list.appendChild(li);
+  }
+
+  card.appendChild(list);
+  return card;
+}
+
+const LEXICON_VIEWS = [
+  { key: "entries", label: "Matched to Lexicon" },
+  { key: "gaps", label: "Not met yet" },
+  { key: "offlist", label: "Off-list words" },
+];
+
+// Rank windows. The full list is 5,000 rows and every one of them builds a
+// table cell, so the default is the part that carries the meaning — the top
+// 1,000 entries cover ~88% of the reference corpus. "All" stays available and is
+// simply slower.
+const LEXICON_WINDOWS = [
+  { key: "500", label: "Top 500", limit: 500 },
+  { key: "1000", label: "Top 1000", limit: 1000 },
+  { key: "2000", label: "Top 2000", limit: 2000 },
+  { key: "all", label: "Whole list", limit: Infinity },
+];
+
+const LEXICON_FILTERS = [
+  { key: "all", label: "All", test: () => true },
+  { key: "met", label: "Met", test: (r) => r.scope_occ > 0 },
+  { key: "unmet", label: "Not met", test: (r) => r.scope_occ === 0 },
+];
+
+// What the `match` column says, and what it sorts on — deliberately the same
+// string. `buildTable` sorts on `get` and displays `text`, so a column that
+// overrides one and not the other sorts on a value the reader cannot see: this
+// column used to sort on `matched_by`, which is "exact" for almost every row
+// while displaying blank, so descending buried the handful of rows worth
+// finding under a thousand identical-looking ones.
+//
+// Blank means the text lemma *is* the list's headword. Anything else is a match
+// resting on a judgment call, and the point of the column is that those are
+// findable — by eye and by sorting.
+//
+// Read off the scoped count, not the whole-text one, so the column agrees with
+// the row it sits in: under "through chapter 2", an entry first met in chapter
+// 30 shows no occurrences, and a note saying how it matched would be reporting
+// a match for a word this view says was never met.
+function matchLabel(row) {
+  if (!row.scope_occ) return ""; // not met in this scope, so nothing was matched here
+  const notes = [];
+  // Ambiguity first: it is the note that inflates coverage rather than merely
+  // explaining it, so it should be the one that catches the eye.
+  if (row.ambiguous) notes.push("ambiguous");
+  if (row.matched_by === "alias") notes.push("alias");
+  if (row.matched_by === "folded") notes.push("folded");
+  return notes.join(" · ");
+}
+
+function matchTitle(row) {
+  if (!row.scope_occ) return ""; // nothing shown in the cell, so nothing to explain
+  const parts = [];
+  if (row.ambiguous) {
+    parts.push(
+      "the list separates senses this parser cannot — every entry sharing the key is credited, so this row may not be earned"
+    );
+  }
+  if (row.matched_by === "alias") parts.push("matched through the curated alias file, not by identity");
+  if (row.matched_by === "folded") parts.push("matched through a dialect fold such as -ττ-/-σσ-");
+  return parts.join("; ");
+}
+
+function lexiconEntryColumns(view, scope, labels, ctx) {
+  const cols = [
+    { label: "rank", get: (r) => r.rank, type: "num", title: "position in the list — 1 is the commonest word" },
+    {
+      // The cell shows the list's headword and the link carries the text's
+      // lemma, which are not always the same string: the list marks homographs
+      // with a digit (`ὅς2`) and cites forms the text may reach only through an
+      // alias or a fold (`ἐθέλω` for a text's `θέλω`). The lemma lens is keyed
+      // by what the parser returned, so the headword would 404 on exactly the
+      // rows whose matching is most worth inspecting. Rows the text never used
+      // — the majority, and the point of this table — have no lemma to open at
+      // all, so they are plain text rather than a link that goes nowhere.
+      label: "lemma",
+      get: (r) => r.lemma,
+      cls: "greek",
+      linkable: (r) => r.occ > 0 && !!r.source_lemma,
+      link: (r) => ctx.focusLemma(r.source_lemma),
+      title: "click a lemma the text uses to open it in the Lemma tab",
+    },
+    { label: "gloss", get: (r) => r.gloss, cls: "lex-gloss" },
+    {
+      label: "occurrences",
+      get: (r) => r.scope_occ,
+      type: "num",
+      html: (r) =>
+        `<span class="lex-occ">${r.scope_occ ? r.scope_occ.toLocaleString() : "—"}</span>` +
+        lexiconBar(r.scope_occ, view.maxOcc),
+      cls: "lex-occ-cell",
+      align: "",
+      title: "how often the text uses this word, in the selected scope",
+    },
+  ];
+  if (scope !== LEXICON_SCOPE_ALL) {
+    cols.push({
+      label: "here",
+      get: (r) => r.scope_here,
+      type: "num",
+      text: (r) => (r.scope_here ? r.scope_here.toLocaleString() : ""),
+      title: "occurrences in the selected chapter alone",
+    });
+  }
+  cols.push(
+    {
+      label: "1st ch",
+      // Not Infinity: `compareBy` subtracts, and Infinity - Infinity is NaN, so
+      // every pair of unmet rows compared as NaN and the sort was undefined.
+      get: (r) => (r.scope_first === null ? Number.MAX_SAFE_INTEGER : r.scope_first),
+      type: "num",
+      text: (r) => (r.scope_first === null ? "" : labels.short(r.scope_first)),
+      cellTitle: (r) => (r.scope_first === null ? "not met yet" : labels.long(r.scope_first)),
+      title: "chapter it is first met in",
+    },
+    {
+      label: "# chs",
+      // Scoped like the occurrence count beside it. Whole-text would put "12
+      // chs" next to a scoped count of 3, which reads as a contradiction rather
+      // than as two different questions.
+      get: (r) => r.scope_chapters,
+      type: "num",
+      text: (r) => (r.scope_chapters ? String(r.scope_chapters) : ""),
+      title: "distinct chapters it appears in, in the selected scope",
+    },
+    {
+      label: "corpus ref %",
+      get: (r) => r.ref_share,
+      type: "num",
+      text: (r) => (r.ref_share >= 0.00005 ? pct(r.ref_share) : "<0.01%"),
+      title:
+        "How much of the reference corpus this word accounts for — the corpus the list's " +
+        "frequencies were counted on, not Greek in general. It is what knowing this one word is worth.",
+    },
+    {
+      label: "match",
+      get: matchLabel,
+      cellTitle: matchTitle,
+      cls: "lex-match",
+      title:
+        "how the text lemma reached this entry — blank where it matched the list exactly, " +
+        "otherwise the match rests on a judgment call",
+    }
+  );
+  return cols;
+}
+
+function lexiconGapColumns(labels) {
+  return [
+    { label: "rank", get: (r) => r.rank, type: "num" },
+    { label: "lemma", get: (r) => r.lemma, cls: "greek" },
+    { label: "gloss", get: (r) => r.gloss, cls: "lex-gloss" },
+    {
+      label: "corpus ref %",
+      get: (r) => r.ref_share,
+      type: "num",
+      text: (r) => (r.ref_share >= 0.00005 ? pct(r.ref_share) : "<0.01%"),
+      title:
+        "How much of the reference corpus this word accounts for — what a reader would gain by meeting it.",
+    },
+  ];
+}
+
+function lexiconOffListColumns(labels, ctx) {
+  return [
+    { label: "type", get: (r) => r.type },
+    {
+      label: "lemma",
+      get: (r) => r.lemma,
+      cls: "greek",
+      link: (r) => ctx.focusLemma(r.lemma),
+      title: "click a lemma to open it in the Lemma tab",
+    },
+    { label: "occ", get: (r) => r.occ, type: "num" },
+    {
+      label: "1st ch",
+      get: (r) => r.first_chapter,
+      type: "num",
+      text: (r) => labels.short(r.first_chapter),
+      cellTitle: (r) => labels.long(r.first_chapter),
+    },
+    { label: "# chs", get: (r) => r.chapter_count, type: "num" },
+    {
+      label: "name",
+      get: (r) => r.proper,
+      type: "bool",
+      title:
+        "Looks like a name. A list that contains proper nouns matches them like any other word — " +
+        "the GNT list does — so a name reaching this table is one the selected list has no entry for. " +
+        "Those are set aside rather than counted against the text.",
+    },
+  ];
+}
+
+function renderLexiconPanel(data, ctx) {
+  const panel = document.createElement("div");
+  panel.className = "tab-panel";
+
+  // Same constraint as the lemma lens and the workbook export: this reads the
+  // stored run rather than the report payload, so with history switched off
+  // there is nothing behind it. Name the setting instead of showing a blank pane.
+  if (!data.run_id) {
+    panel.innerHTML = `<p class="muted">The lexicon lens benchmarks a stored run against a reference word list, and this report has none — run history is switched off (<code>LINGUA_PERSIST_RUNS=false</code>). Re-enable it and analyze again to use this tab.</p>`;
+    return panel;
+  }
+
+  const labels = chapterLabels(data.text_report || { chapters: [] });
+  const state = {
+    lexiconId: null,
+    scope: LEXICON_SCOPE_ALL,
+    view: "entries",
+    window: "1000",
+    filter: "all",
+    // Distinct words by default: the question this chart is asked first is
+    // "how much vocabulary does the reader have to carry", and tokens answer
+    // the different one of how much running text those words account for.
+    growthUnit: "types",
+  };
+  let report = null;
+  let disposeChart = null;
+  // Switching lists faster than the fetches return would otherwise let a slow
+  // earlier response paint over a later one. Same guard the lemma lens uses.
+  let request = 0;
+
+  const toolbar = document.createElement("div");
+  toolbar.className = "lex-toolbar";
+  const body = document.createElement("div");
+
+  const picker = document.createElement("select");
+  picker.className = "lex-picker";
+  picker.setAttribute("aria-label", "Reference word list");
+  const scopePicker = document.createElement("select");
+  scopePicker.className = "lex-scope";
+  scopePicker.setAttribute("aria-label", "Scope");
+
+  toolbar.append(
+    Object.assign(document.createElement("label"), { className: "lex-label muted", textContent: "Benchmark against" }),
+    picker,
+    Object.assign(document.createElement("label"), { className: "lex-label muted", textContent: "through" }),
+    scopePicker
+  );
+  panel.append(toolbar, body);
+
+  function note(text, isError = false) {
+    body.innerHTML = `<p class="${isError ? "lemma-error" : "muted"}">${escapeHtml(text)}</p>`;
+  }
+
+  function fillScopePicker() {
+    const options = [`<option value="${LEXICON_SCOPE_ALL}">the whole text</option>`];
+    for (const p of report.progress) {
+      options.push(
+        `<option value="${p.chapter_index}">${escapeHtml(labels.long(p.chapter_index))}</option>`
+      );
+    }
+    scopePicker.innerHTML = options.join("");
+    scopePicker.value = String(state.scope);
+    // A one-chapter run has exactly one scope beyond "the whole text", and they
+    // are the same set — so the control would be a choice between two identical
+    // answers. Hide it rather than offer it.
+    const useful = report.progress.length > 1;
+    scopePicker.hidden = !useful;
+    toolbar.querySelectorAll(".lex-label")[1].hidden = !useful;
+  }
+
+  function paint() {
+    if (disposeChart) disposeChart();
+    disposeChart = null;
+    if (!report) return;
+
+    const view = lexiconScopeView(report, state.scope);
+    body.replaceChildren();
+    body.append(
+      lexiconHeadline(report, view, state.scope, labels),
+      lexiconMatchNote(report.match, state.scope !== LEXICON_SCOPE_ALL)
+    );
+
+    const charts = document.createElement("div");
+    charts.className = "chart-stack";
+
+    if (report.progress.length > 1) {
+      const { card, head } = chartCard(
+        "List coverage by chapter",
+        "Everything a reader has met by the end of each chapter, and how much of it is list vocabulary. " +
+          "Click a column to scope the tables below to it."
+      );
+
+      // The unit toggle only rebuilds the chart. `paint()` would rebuild the
+      // table underneath it too, and that is a thousand rows for a control that
+      // has nothing to say about them.
+      const controls = document.createElement("div");
+      controls.className = "chart-controls";
+      const group = document.createElement("span");
+      group.className = "segmented";
+      group.setAttribute("role", "group");
+      group.setAttribute("aria-label", "Count by");
+      for (const u of GROWTH_UNITS) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "btn-quiet" + (state.growthUnit === u.key ? " active" : "");
+        btn.setAttribute("aria-pressed", String(state.growthUnit === u.key));
+        btn.textContent = u.label;
+        btn.addEventListener("click", () => {
+          if (state.growthUnit === u.key) return;
+          state.growthUnit = u.key;
+          [...group.children].forEach((b) => {
+            const on = b.textContent === u.label;
+            b.classList.toggle("active", on);
+            b.setAttribute("aria-pressed", String(on));
+          });
+          draw();
+        });
+        group.appendChild(btn);
+      }
+      controls.appendChild(group);
+      head.appendChild(controls);
+
+      const plot = document.createElement("div");
+      card.append(
+        chartLegend(GROWTH_SEGMENTS.map((seg) => ({ slot: seg.slot, label: seg.label }))),
+        plot
+      );
+
+      let width = 0;
+      const render = () =>
+        plot.replaceChildren(
+          lexiconGrowthPlot(report, labels, state.growthUnit, state.scope, (chapter) => {
+            state.scope = state.scope === chapter ? LEXICON_SCOPE_ALL : chapter;
+            scopePicker.value = String(state.scope);
+            paint();
+          }, width)
+        );
+      const draw = () => width && render();
+      disposeChart = autosize(plot, (w) => {
+        width = w;
+        render();
+      });
+      charts.appendChild(card);
+    }
+    charts.appendChild(lexiconBandChart(view));
+    body.appendChild(charts);
+
+    // -- tables ---------------------------------------------------------
+    const tabs = document.createElement("div");
+    tabs.className = "lex-views segmented";
+    tabs.setAttribute("role", "group");
+    tabs.setAttribute("aria-label", "Table");
+    for (const v of LEXICON_VIEWS) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "btn-quiet" + (state.view === v.key ? " active" : "");
+      btn.setAttribute("aria-pressed", String(state.view === v.key));
+      btn.textContent = v.label;
+      btn.addEventListener("click", () => {
+        state.view = v.key;
+        paint();
+      });
+      tabs.appendChild(btn);
+    }
+
+    const controls = document.createElement("div");
+    controls.className = "lex-controls";
+    if (state.view === "entries") {
+      const group = (items, active, onPick, label) => {
+        const wrap = document.createElement("div");
+        wrap.className = "segmented";
+        wrap.setAttribute("role", "group");
+        wrap.setAttribute("aria-label", label);
+        for (const item of items) {
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "btn-quiet" + (active === item.key ? " active" : "");
+          btn.setAttribute("aria-pressed", String(active === item.key));
+          btn.textContent = item.label;
+          btn.addEventListener("click", () => onPick(item.key));
+          wrap.appendChild(btn);
+        }
+        return wrap;
+      };
+      controls.append(
+        Object.assign(document.createElement("span"), { className: "muted", textContent: "show" }),
+        group(
+          LEXICON_WINDOWS,
+          state.window,
+          (key) => {
+            state.window = key;
+            paint();
+          },
+          "How much of the list to show"
+        ),
+        group(
+          LEXICON_FILTERS,
+          state.filter,
+          (key) => {
+            state.filter = key;
+            paint();
+          },
+          "Filter by whether it is met"
+        )
+      );
+    }
+
+    const caption = document.createElement("p");
+    caption.className = "lex-caption muted";
+    const slot = document.createElement("div");
+
+    if (state.view === "entries") {
+      const limit = LEXICON_WINDOWS.find((w) => w.key === state.window).limit;
+      const filter = LEXICON_FILTERS.find((f) => f.key === state.filter);
+      const rows = view.rows.filter((r) => r.rank <= limit && filter.test(r));
+      caption.textContent =
+        `${rows.length.toLocaleString()} rows. The list in rank order — a row with no occurrences is a word ` +
+        `the list says matters that this text has not used yet.`;
+      slot.replaceChildren(
+        buildTable(lexiconEntryColumns(view, state.scope, labels, ctx), rows, {
+          rowClass: (r) => (r.scope_occ > 0 ? "" : "lex-unmet"),
+        })
+      );
+    } else if (state.view === "gaps") {
+      // Deliberately whole-text: "what does this text never use" is the
+      // worklist an author wants, and scoping it to an early chapter would fill
+      // it with words chapter 30 already covers.
+      caption.textContent =
+        `The ${report.gaps.length.toLocaleString()} commonest of ${report.gaps_total.toLocaleString()} words ` +
+        `the list asks for that this text never uses, across the whole text. Ordered by rank, so the top of ` +
+        `this table is the most valuable thing missing.`;
+      slot.replaceChildren(buildTable(lexiconGapColumns(labels), report.gaps, { className: "table-narrow" }));
+    } else {
+      caption.textContent =
+        `${report.off_list.length.toLocaleString()} of ${report.off_list_total.toLocaleString()} words the text ` +
+        `met in the text that this list does not ask for, commonest first. Vocabulary load that does not move a reader ` +
+        `toward the goal — names excepted, since the selected list has no entry for them.`;
+      slot.replaceChildren(buildTable(lexiconOffListColumns(labels, ctx), report.off_list));
+    }
+
+    body.append(tabs, controls, caption, slot);
+  }
+
+  async function load(lexiconId) {
+    const token = ++request;
+    note(`Loading ${lexiconId ? "" : "the default "}word list…`);
+    try {
+      const query = lexiconId ? `?lexicon_id=${encodeURIComponent(lexiconId)}` : "";
+      const res = await fetch(`/api/runs/${data.run_id}/lexicon${query}`);
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || "Could not load that word list.");
+      }
+      const loaded = await res.json();
+      if (token !== request) return;
+      report = loaded;
+      state.lexiconId = report.lexicon.id;
+      fillScopePicker();
+      paint();
+    } catch (e) {
+      if (token !== request) return;
+      note(String(e.message || e), true);
+    }
+  }
+
+  picker.addEventListener("change", () => {
+    state.scope = LEXICON_SCOPE_ALL;
+    load(picker.value);
+  });
+  scopePicker.addEventListener("change", () => {
+    state.scope = Number(scopePicker.value);
+    paint();
+  });
+
+  // The picker is filled from the install's manifest, not from the report, so
+  // it can be populated before any list has been chosen — and so a second list
+  // dropped into data/lexicons/ shows up here without touching this file.
+  (async () => {
+    try {
+      const res = await fetch("/api/lexicons");
+      const { lexicons = [] } = await res.json();
+      if (!lexicons.length) {
+        note("No reference word lists are installed. Add one to data/lexicons/ and reload.");
+        picker.hidden = true;
+        return;
+      }
+      picker.innerHTML = lexicons
+        .map(
+          (l) =>
+            `<option value="${escapeHtml(l.id)}" title="${escapeHtml(l.description)}">` +
+            `${escapeHtml(l.name)} (${l.entry_count.toLocaleString()})</option>`
+        )
+        .join("");
+      // One list is not a choice. Keep the control in the DOM for layout and
+      // for the day a second one is added, but do not ask the reader to operate it.
+      picker.disabled = lexicons.length === 1;
+      load(lexicons[0].id);
+    } catch (e) {
+      note("Could not load the list of reference lexicons.", true);
+    }
+  })();
+
+  return panel;
+}
+
 // Which lens is on screen. Module-level so switching between stored runs keeps
 // you in the tab you were reading rather than snapping back to Chapters.
 let activeTab = "chapters";
@@ -2158,6 +3112,7 @@ const TABS = [
   { key: "chapters", label: "Chapters", build: (data, ctx) => renderChaptersPanel(data, ctx) },
   { key: "text", label: "Text", build: (data, ctx) => renderTextPanel(data.text_report, ctx) },
   { key: "lemma", label: "Lemma", build: (data, ctx) => renderLemmaPanel(data, ctx) },
+  { key: "lexicon", label: "Lexicon", build: (data, ctx) => renderLexiconPanel(data, ctx) },
 ];
 
 function renderReport(data, notice = null) {

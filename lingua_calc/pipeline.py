@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable, Sequence
 
-from lingua_calc import index_cache
+from lingua_calc import index_cache, lexicon as lexicon_mod
 from lingua_calc.clean_extracted_files import clean_chapters
 from lingua_calc.config import Settings, get_settings
 from lingua_calc.corpus import ChapterRef, CorpusIndex
@@ -15,6 +15,7 @@ from lingua_calc.models import (
     DocumentReport,
     FileReport,
     LemmaReport,
+    LexiconReport,
     MultiFileReport,
     ParsedToken,
     TokenFact,
@@ -26,6 +27,7 @@ from lingua_calc.stats import (
     LEMMA_OCCURRENCE_LIMIT,
     build_chapter_report,
     build_lemma_report,
+    build_lexicon_report,
     build_text_report,
 )
 from lingua_calc.store import TokenStore, save_run_safely
@@ -314,3 +316,29 @@ def lemma_report_from_run(
     return build_lemma_report(
         index, lemma, limit=limit, chapter_index=chapter_index, context=context
     )
+
+
+def lexicon_report_from_run(
+    run_id: str,
+    lexicon_id: str | None = None,
+    store: TokenStore | None = None,
+    settings: Settings | None = None,
+) -> LexiconReport | None:
+    """Benchmark a stored run against a reference vocabulary list.
+
+    ``None`` covers "no such run" and "no such lexicon" alike, for the same
+    reason ``lemma_report_from_run`` collapses its two misses: the caller has
+    nothing more useful to say than "not found", and the UI recovers from both
+    by falling back to the default lexicon.
+
+    Free in provider terms, like every other re-derivation here — the list comes
+    off disk and the counts off a cached index.
+    """
+    settings = settings or get_settings()
+    index = load_run_index(run_id, store=store, settings=settings)
+    if index is None:
+        return None
+    lexicon = lexicon_mod.load(settings.lexicon_dir, lexicon_id)
+    if lexicon is None:
+        return None
+    return build_lexicon_report(index, lexicon)

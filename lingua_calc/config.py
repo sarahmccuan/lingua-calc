@@ -70,6 +70,10 @@ class Settings(BaseSettings):
     # over the same text be compared. Set LINGUA_PERSIST_RUNS=false to disable.
     db_path: str = "data/lingua_calc.sqlite3"
     persist_runs: bool = True
+    # Where the reference vocabulary lists live — a manifest plus one CSV per
+    # lexicon. Reference data rather than run data, so it sits beside the store
+    # rather than inside it; see lexicon.py for why it is not a table.
+    lexicon_dir: str = "data/lexicons"
     bedrock_timeout_seconds: int = Field(
         default=1200,
         validation_alias="BEDROCK_TIMEOUT_SECONDS",

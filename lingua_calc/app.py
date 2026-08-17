@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from lingua_calc import lexicon as lexicon_mod
 from lingua_calc.config import get_settings
 from lingua_calc.export import MEDIA_TYPE as XLSX_MEDIA_TYPE
 from lingua_calc.export import build_export
@@ -23,6 +24,7 @@ from lingua_calc.pipeline import (
     analyze_docx_bytes,
     analyze_docx_files,
     lemma_report_from_run,
+    lexicon_report_from_run,
     open_store,
     reports_from_run,
 )
@@ -238,6 +240,52 @@ def create_app() -> FastAPI:
         )
         if report is None:
             raise HTTPException(status_code=404, detail="No such run, or that lemma is not in it.")
+        return JSONResponse(json.loads(report.model_dump_json()))
+
+    @app.get("/api/lexicons")
+    def list_lexicons() -> JSONResponse:
+        """Every reference list the manifest offers, default first.
+
+        Its own route rather than a field on the report because the picker has to
+        be populated before a lexicon has been chosen, and because the answer is
+        identical for every run — it is a property of the install, not of the
+        text being read.
+        """
+        metas = lexicon_mod.available(settings.lexicon_dir)
+        return JSONResponse(
+            {
+                "lexicons": [
+                    {
+                        "id": m.id,
+                        "name": m.name,
+                        "short_name": m.short_name,
+                        "description": m.description,
+                        "entry_count": m.entry_count,
+                        "reference_tokens": m.reference_tokens,
+                        "source": m.source,
+                    }
+                    for m in metas
+                ],
+                "default": metas[0].id if metas else None,
+            }
+        )
+
+    @app.get("/api/runs/{run_id}/lexicon")
+    def run_lexicon(run_id: str, lexicon_id: str | None = None) -> JSONResponse:
+        """A stored run benchmarked against one reference list.
+
+        Its own route rather than a section of the report, for the reason the
+        lemma lens has one: the payload is a 5000-row join against data the
+        report knows nothing about, and shipping it with every run would charge
+        every reader for a lens most of them will not open. Re-derivation is free
+        — no provider call — so switching lists is a fetch, not a re-analysis.
+        """
+        _require_store()
+        report = lexicon_report_from_run(run_id, lexicon_id, settings=settings)
+        if report is None:
+            raise HTTPException(
+                status_code=404, detail="No such run, or no such lexicon."
+            )
         return JSONResponse(json.loads(report.model_dump_json()))
 
     @app.delete("/api/runs/{run_id}")

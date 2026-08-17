@@ -130,7 +130,7 @@ Measured on the stored `Basil To the Rich` run (4,213 tokens): 100% of morpholog
 
 **Tests:** `pip install -e ".[dev]"` then `pytest`. `tests/conftest.py` has a `WordProvider` stand-in and an in-memory `.docx` builder, so the pipeline is testable without touching Bedrock.
 
-## Lenses (issues #14 / #15 / #16)
+## Lenses (issues #14 / #15 / #16, plus the lexicon tab)
 
 The report is three tabs over one index, not three reports: **Chapters** (is *this* chapter right?), **Text** (is the whole progression right?), **Lemma** (where does *this word* live?).
 
@@ -240,6 +240,99 @@ The cache is a separate module for one reason: `store` has to invalidate, and `s
 The picker is fed from `TextReport.lemma_rows`, so choosing a word costs no request, and search folds diacritics (NFD, strip combining marks) — an author reaching for `λόγος` types `λογος`, and a search that misses it reads as "that word is not in this text".
 
 **Not done:** the export's `Rows` sheet (issue #3) still has its original columns; `lemma_cum`/`parse_cum`, the text-lens grain and the concordance are not in it.
+
+### Lexicon tab
+
+The fourth lens inverts the question. The other three read the text and report what is in it; this one fixes a ranked vocabulary list as the **goal** and asks how much of it the text has taught, chapter by chapter — so every headline figure has the *list* in its denominator, and a row with zero occurrences is as interesting as one with many. The framing is deliberate and it is the pedagogy: we are writing texts that teach the dictionary, not asking learners to memorise the dictionary and then meet the text.
+
+**The headline reports its scope in words, and the words have to be exact.** The picker is cumulative — it reads "through <chapter>" — so only the opening chapter is both a single chapter and the whole scope. `scopePhrase` says "this chapter" there, "chapters 1–3" past it, and "this text" unscoped; calling a cumulative figure "this chapter" would be a plain misreport of a number that includes everything before it. The tooltip is phrased passively ("entries used at least once in …") so one string serves a singular and a plural subject.
+
+**The headline is deliberately spare:** how many list words a reader meets, and how much of the text is list vocabulary at all. On the stored 4-chapter LGPSI run, 105 of 5000 entries and 81.9% of tokens.
+
+**A third figure was cut, and the reasoning is worth keeping.** `ref_share_covered` weights the covered entries by how common each is in the reference corpus — real information, and the only thing that separates a text teaching the top 300 words from one teaching 300 rarities. It shipped as "49.4% of running Greek unlocked" and every part of that label was wrong:
+
+- **Not "Greek" — whichever corpus the list came from.** The same LGPSI run reads 49.4% against Core 5000 and 55.0% against GNT. The text did not change; the yardstick did.
+- **Not "unlocked".** Comfortable reading needs ~95–98% token coverage. At 49% roughly every other word is unknown.
+- **The scale is so front-loaded that the percentage barely means anything.** `ὁ` alone is 11.3% of the Core 5000 corpus; the top ten words are 31%. Any text using the article, καί and εἰμί starts near 30% before teaching anything. Word #100 adds 0.12%, word #1000 adds 0.009%.
+
+`LexiconSummary.ref_share_covered` / `ref_share_total` and the per-entry `ref_share` are still computed, still tested, and still shipped — the arithmetic was never the problem, the framing was. Whatever presents it next should probably show it against its ceiling (the best possible 105 words score 62.8%, so LGPSI's are good but not optimal), which says something actionable that a bare percentage does not. For now the band chart carries the weighting argument.
+
+#### The list is a checked-in CSV, not a table
+
+`data/lexicons/` holds `manifest.json`, one entries CSV per lexicon, and an optional aliases CSV. Adding a lexicon is dropping a file and adding a manifest row; nothing in the package hard-codes an id and the UI dropdown is built from `GET /api/lexicons`.
+
+This reverses the guess in the original scoping. A lexicon is reference data — 5000 rows, ~400KB, immutable between edits, identical for every run — and putting it in SQLite would buy a join nothing performs (every statistic here is derived in Python from a `CorpusIndex`, never in SQL) at the cost of a seeding step, a migration, and a cache that can disagree with the file on disk. It would also put the alias file **inside** whatever gets packaged, and the alias file is meant to be hand-edited by the author. So: read the CSV, cache per process, `lexicon.clear_cache()` after editing one.
+
+`.gitignore` needed `data/*` plus `!data/lexicons/`, not `data/` — git cannot re-include a path whose parent directory is itself excluded, so the "checked-in" CSV was silently not checked in until that changed.
+
+`data/lexicons/greek-core-5k.csv` was generated once from the Google Sheet's `gid=0` (5000 rows: rank, lemma, gloss, kind, ref_count, ref_coverage). The sheet is several side-by-side blocks in one tab with blank spacer columns; only the first block is used. Rerun the prep by hand if the sheet changes — it is not wired into the app.
+
+#### A second list, and what it broke
+
+`gnt-lemmas` is every lemma in the Greek New Testament — **5,461 of them over 137,554 lemma tokens** — generated from James Tauber's [vocabulary-tools](https://github.com/jtauber/vocabulary-tools) via `tools/prep_gnt_lexicon.py`. Adding it was a CSV plus a manifest row, with no change to `lexicon.py`, `stats.py`, `app.py` or the panel; the dropdown enables itself once there are two. That was the design claim and it held.
+
+**It also falsified an assumption worth being explicit about: the Core 5000 has no proper nouns, and the GNT list has hundreds.** `is_proper_noun` is a *fallback for lemmas that did not match*, never a filter applied before matching — so `Ἰησοῦς` counts as taught against the GNT list and `Γρηγόριος`, which no list contains, is still set aside. Both behaviours fall out of the same ordering, but nothing had tested it until there was a list to test it with. On the 4-chapter LGPSI run the difference is concrete:
+
+| | Core 5000 | GNT |
+|---|---|---|
+| entries taught | 105 / 5,000 | 117 / 5,461 |
+| text that is list vocabulary | 81.9% | 87.7% |
+| names set aside | 33 lemmas / 633 tokens | 21 / 381 |
+
+The 252-token gap is LGPSI's geography and cast — `Ἀσία`, `Συρία`, `Αἴγυπτος`, `Ἰταλία`, `Λιβύη`, `Δημήτριος`, `Τίτος`, `Φοίβη` — which the GNT list can credit and a classical frequency list never could.
+
+Two further notes on this list. **Glosses are borrowed** from the Core 5000 where the two lists name the same word (51% of entries); the GNT data carries no definitions, and where a key names several 5k entries the best-ranked sense wins so the choice is deterministic. **`kind` is folded from MorphGNT part-of-speech codes** (`N-`/`V-`/`A-`/`D-`/`I-` lexical, the closed classes function), which is a more principled split than the Core 5000's own column, where 2,050 of 5,000 rows are blank.
+
+`vendor/` (gitignored, ~97MB) holds the clone; the venv reaches it through a `.pth`, which is what `pip install -e` writes anyway — the repo is a set of scripts, not a PyPI package. **`PYTHONUTF8=1` is required** to run it: `gnt_data/main.py` opens its 8MB token file without an explicit encoding, so on Windows it decodes as cp1252 and dies on the first Greek line. `tools/README.md` has the full recipe, and regeneration is byte-reproducible.
+
+#### Matching is the part that can lie
+
+`lexicon.py` layers three rules so each can be audited separately and no looser rule can overrule a stricter one:
+
+1. **`match_key`** — mechanical and safe. NFC, drop macrons/breves (the list's citation forms carry them, Bedrock's lemmas do not), strip the trailing digit that marks a homograph, lowercase. This alone places **85.8%** of tokens in the stored corpus.
+2. **the alias file** — curated, hand-edited, tagged by `kind` so a reader can tell an unarguable spelling variant (`οὕτω`→`οὕτως`) from a judgment call (`μόνον`→`μόνος`, an adverb filed under its adjective). 29 rows shipped.
+3. **`fold_key`** — the systematic Attic/Koine alternations (`-ττ-`/`-σσ-`, `-ρρ-`/`-ρσ-`, `γιγν-`/`γιν-`), tried last.
+
+**Accents and breathings survive every layer, and that is load-bearing.** An earlier, greedier normaliser that stripped them plus movable nu/sigma bought +0.6% tokens and collapsed `οὔ` onto five different entries (`οὐ`, `οὖν`, `οὗ2`, `οὗ`, `οὖς`), mismatched `καλῶς`→`κάλως` ("rope") and `ψευδῶς`→`ψεύδω`. The list *also* separates three accent-distinguished pairs on purpose — `βιός`/`βίος` (a bow / a life), `νομός`/`νόμος`, `τροπός`/`τρόπος` — so stripping accents would silently merge real entries. The conservative fold adds ten types with **zero** false positives; that is the trade that was taken. `tests/test_lexicon.py` pins all of it.
+
+**Names get their own bucket.** The list contains zero capitalised headwords out of 5000, so a proper noun can never match, and counting names as "vocabulary outside the goal" makes every text look worse than it is. On the LGPSI run that misjudgement would be **633 of 3,572 tokens — 18%**. Bedrock capitalises name lemmas and lowercases everything else, so `is_proper_noun` reads the lemma; surface *forms* cannot be used, since one source text is set entirely in capitals.
+
+**Homograph keys credit every entry they name.** `ὅς` and `ὅς2` are one string to the provider. Crediting both over-counts by at most the 51 colliding keys (~1%); crediting neither makes those entries permanently unreachable and silently caps the coverage any text could ever reach, which is the worse lie. `Match.ambiguous` marks them and the match report counts them.
+
+**`LexiconMatchReport` rides along with every figure**, for the same reason `CoverageReport` sits beside the grammar counts: a lemma the matcher failed to place is indistinguishable from a word genuinely off the list, and both land outside the numerator. The note turns amber below ~80% of tokens placed. **Growing the alias file from the off-list table is the intended maintenance loop** — it is a data-curation task, not a code change.
+
+#### Payload and scoping
+
+Its own route (`GET /api/runs/{id}/lexicon?lexicon_id=…`), not a section of the report — a 5000-row join against data the report knows nothing about has no business riding along with runs nobody opens it for. **Same constraint as the lemma lens: this needs a stored run,** and says which setting is in the way when `LINGUA_PERSIST_RUNS=false`.
+
+Per-entry chapter counts are **sparse** (`chapters: [{chapter_index, occ}]`, absent where zero) — a covered entry appears in a handful of chapters out of sixty. That is what lets the whole scope control be client-side arithmetic (`lexiconScopeView`): scoping to a chapter on a 60-chapter text would otherwise be 60 fetches of a megabyte each. Scope is **cumulative** ("through chapter 8"), because what a reader has met by now is the question an author writing chapter 9 is asking; the chapter-only count rides along as a `here` column rather than replacing it.
+
+#### Reading the tab
+
+- **The growth chart** is cumulative and stacks four segments, bottom to top: list already met, off-list already met, list new here, off-list new here. It groups by novelty rather than by list membership, so everything the reader already had is the base and everything the chapter adds stacks on top — the same grammar the text tab's progression chart uses, and the growing edge of the bar is always what is new. The cost is that the two list segments are not adjacent, so cumulative list vocabulary is no longer readable as a single edge; it is in the tooltip, and the band chart below answers the same question standing still. Columns are clickable to scope the tables; the hit target is full-height so a chapter that taught nothing new is still reachable — a flat stretch is the finding.
+- **Two dimensions, two channels: hue for new vs already met, saturation for on-list vs off-list.** `--series-1-muted` / `--series-2-muted` are washed-out twins of the existing blue and orange, so a reader learns one rule rather than a four-colour legend.
+- **The muted pair recedes, and that is the meaning rather than the styling.** Off-list vocabulary is load a reader carries without progressing toward the goal, so it should read as the quieter thing in the bar. "Recedes" means toward the background in both themes — lighter on the light one, dimmer on the dark one, the same direction `--muted` moves from `--fg`. An earlier cut went *darker* on the light theme to protect contrast, which was legible and said the wrong thing: it made off-list the most emphatic block in the chart.
+- **The stacking order is what makes that safe to do.** Receding costs contrast, but the muted orange is always *interior* — list-already-met below it, list-new above — so both its edges meet a saturated block and it never has to hold its own against the page. Only the muted blue sits on top of the stack, and it keeps the greater contrast of the two for exactly that reason. Reorder `GROWTH_SEGMENTS` and that stops being true.
+- **The chart counts the text's own words, not list entries, and a toggle switches types/tokens.** Entries cannot carry the off-list dimension at all (an off-list word is by definition not an entry), and they do not partition: a spelling can credit two entries and two spellings can credit one. Counting distinct lemmas and tokens makes the four segments sum to the corpus exactly, which is what `test_new_vocabulary_split_partitions_the_corpus` pins. The authoritative entries-taught and %-of-Greek figures still ride in the tooltip, and can differ from the list block by a row or two for the reason just given.
+- **Names are folded into off-list in this chart only.** Everywhere else on the tab they are a third bucket, because no list can contain them and charging a text for them is unfair. Here the bar has to total the real page, so `tokens_off_list_with_names` exists alongside `tokens_off_list` rather than one being re-derived from the other and getting it subtly wrong. Note that `gnt-lemmas` *does* contain names, so what lands in this segment is list-dependent.
+- **`new` cumulates for tokens and does not for types, and the asymmetry is the correct one.** A lemma sits in the bar once, so splitting it into "debuted here" and "debuted earlier" partitions the bar and both labels are literally true. An occurrence sits in the bar once *per occurrence*, so the same rule mislabels history: taking only this chapter's first-encounter tokens as `new` sweeps every earlier chapter's first encounters into `already met`. On the LGPSI run that put 1,078 tokens under a label claiming the reader already knew those words when each was in fact a first meeting. Cumulating makes the split "read while the word was new" vs "read once it was known" — what the legend claims, and what the text tab's `new_tokens` means added up.
+- **Both halves of that were bugs, found in opposite directions.** The first cut accumulated `new` in *both* units, which pinned already-met at zero in the types view (a tooltip read "105 — 105 new here, 0 already met" on the last chapter of four). Fixing it by making both units per-chapter then broke tokens the other way, silently — the arithmetic still balanced, which is why it survived a full numeric audit and was only caught by asking what the segments *meant*. Validation that only checks sums will not find this class of error.
+- **The band chart** slices the list 500 at a time and draws one bar per block: how much of it the text teaches. It briefly drew a second bar for what each block is *worth* in the reference corpus — ranks 1–500 cover **81.3%** of it — which is real information but reads as noise beside the bar it qualifies, two lengths per row and neither the one being scanned. That weighting is now read deliberately in the `corpus ref %` column of the table rather than glanced at anywhere. `LexiconBand` still carries `ref_share`/`ref_share_covered`; they are simply not drawn.
+- **Three tables.** *Matched to Lexicon*, the list in rank order (untaught rows dimmed but legible — they are half the point); **not taught yet**, which is the authoring worklist, deliberately whole-text so an early scope does not fill it with words chapter 30 already covers; and **off-list words**, the vocabulary load that does not move a reader toward the goal, names excepted.
+- **The list table windows to the top 1000 by default.** All 5000 rows render in ~550ms, which is tolerable but not free, and the top 1000 covers ~88% of the reference corpus.
+
+**The `match` column is the audit trail, and it names ambiguity out loud.** Blank means the text lemma *is* the list's headword; `alias` and `folded` mean the match rests on a judgment call; `ambiguous` means the list separates senses the parser cannot, so every entry sharing the key was credited. That last one is the case that inflates coverage rather than merely explaining it — on the LGPSI run it is 6 entry pairs (`κύριος`/`κύριος2` both credited from the same 17 tokens, likewise `ὅς`, `ὅτι`, `ἤ`, `πάρειμι`, `ἄπειμι`), about **6% of the covered total**. It was tooltip-only at first, which made the one number worth doubting the only one you could not see.
+
+**Two sorting bugs the `match` column flushed out, both worth not repeating:**
+
+- **`get` is the sort key *and* the displayed value; overriding `text` alone sorts on something invisible.** This column originally sorted on `matched_by` — `"exact"` for nearly every row — while displaying blank, so descending buried the handful of interesting rows under a thousand identical-looking ones. Fixed by deriving one string (`matchLabel`) and using it for both. If a column ever needs `text` to differ from `get`, `get` must still order the way the display reads.
+- **Never use `Infinity` as a sort sentinel.** `compareBy`'s numeric branch subtracts, and `Infinity - Infinity` is `NaN`; a comparator returning `NaN` makes `Array.prototype.sort` undefined, so the 907 untaught rows in the `1st ch` column came out in arbitrary order. `Number.MAX_SAFE_INTEGER` subtracts to 0 and groups them correctly. The other two `Infinity` uses in `app.js` are a `Math.max` seed and a `<=` filter bound, both safe.
+
+There is no JS test runner in this project, so both were verified in the browser by sorting every column in both directions and asserting the rendered values are monotonic — worth redoing by hand if the columns change.
+
+**`buildTable` columns can now carry `html`.** One escape hatch, so a cell can hold a bar beside its number rather than a number alone; the column owns its own escaping. Bars are **square-rooted** — the article is 2,715 of 4,213 tokens in the Basil run, and against a linear scale every other row is one pixel wide, which is true and useless.
+
+**Not done:** the workbook export has no lexicon sheet; there is no cross-run comparison (does chapter 40 of draft B teach more of the list than draft A?); and `LexiconEntryRow.chapters` is sparse but the entries array is not — a much longer list would want windowing server-side.
 
 ## Performance & throughput
 
