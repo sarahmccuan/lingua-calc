@@ -1,6 +1,6 @@
 # Lingua Calc
 
-Prototype: upload a `.docx` chapter (or document with Heading 1 sections), get per-chapter **lemma / form / parse** tables and counts via **Amazon Bedrock** (Claude).
+Upload a `.docx` chapter (or document with Heading 1 sections), get per-chapter **lemma / form / parse** tables and counts via **Amazon Bedrock** (Claude).
 
 ## Setup
 
@@ -70,3 +70,20 @@ standard unprefixed names, so an existing boto3 setup keeps working.
 
 - `lingua_calc/` — FastAPI app, docx extract, Bedrock provider, stats
 - `ui/` — Static HTML/CSS/JS served from the same origin
+
+## Contributing
+
+Bug reports and pull requests are welcome at
+[github.com/sarahmccuan/lingua-calc](https://github.com/sarahmccuan/lingua-calc).
+
+1. Fork and branch off `main`.
+2. Install the dev extras: `pip install -e ".[dev]"`.
+3. Run the tests: `pytest`.
+4. Open a pull request describing what changed and why.
+
+By contributing you agree that your contributions are licensed under the MPL 2.0
+(see below).
+
+## License
+
+Licensed under the [Mozilla Public License 2.0](LICENSE.txt).
